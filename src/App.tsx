@@ -9,6 +9,7 @@ import {
   FileCode2,
   Folder,
   Gauge,
+  KeyRound,
   Menu,
   MessageSquarePlus,
   PanelRightClose,
@@ -29,12 +30,15 @@ import clsx from 'clsx'
 import { Markdown } from './components/Markdown'
 import { EventItem } from './components/EventItem'
 import { PermissionDialog } from './components/PermissionDialog'
+import { LlmSettingsDialog } from './components/LlmSettingsDialog'
 import type {
   AgentConfig,
   AppDiagnostics,
   ChatMessage,
   EffortLevel,
   LabSession,
+  LlmApiConfigInput,
+  LlmApiConfigPublic,
   PermissionDecision,
   PermissionMode,
   PermissionRequest,
@@ -114,6 +118,8 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [suggestion, setSuggestion] = useState('')
   const [loading, setLoading] = useState(true)
+  const [llmConfig, setLlmConfig] = useState<LlmApiConfigPublic>()
+  const [llmSettingsOpen, setLlmSettingsOpen] = useState(false)
   const saveTimer = useRef<number | undefined>(undefined)
   const transcriptRef = useRef<HTMLDivElement>(null)
 
@@ -128,6 +134,7 @@ export function App() {
       setSessions(snapshot.sessions)
       setActiveSessionId(snapshot.activeSessionId ?? snapshot.sessions[0]?.id)
       setDiagnostics(snapshot.diagnostics)
+      setLlmConfig(snapshot.llmConfig)
       setLoading(false)
     })
 
@@ -231,6 +238,18 @@ export function App() {
     })
   }
 
+  const saveLlmConfig = async (input: LlmApiConfigInput) => {
+    const saved = await window.agentLab.saveLlmConfig(input)
+    setLlmConfig(saved)
+    setDiagnostics((current) => current ? { ...current, apiKeyConfigured: saved.apiKeyConfigured } : current)
+  }
+
+  const clearLlmConfig = async () => {
+    const cleared = await window.agentLab.clearLlmConfig()
+    setLlmConfig(cleared)
+    setDiagnostics((current) => current ? { ...current, apiKeyConfigured: cleared.apiKeyConfigured } : current)
+  }
+
   if (loading || !activeSession) return <div className="loading-screen"><div className="brand-orbit"><Sparkles size={20} /></div><span>正在启动 AgentLab…</span></div>
 
   const config = activeSession.config
@@ -257,7 +276,7 @@ export function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <div className={clsx('auth-state', diagnostics?.apiKeyConfigured && 'ready')}><Circle size={9} fill="currentColor" /><span>{diagnostics?.apiKeyConfigured ? 'API Key 已配置' : '需要 ANTHROPIC_API_KEY'}</span></div>
+          <button className={clsx('auth-state', diagnostics?.apiKeyConfigured && 'ready')} onClick={() => setLlmSettingsOpen(true)}><Circle size={9} fill="currentColor" /><span>{diagnostics?.apiKeyConfigured ? `API 已配置 · ${llmConfig?.source === 'environment' ? '环境' : '加密存储'}` : '配置 LLM API'}</span></button>
           <button onClick={() => setInspectorTab('sdk')}><Activity size={15} /> SDK {diagnostics?.sdkVersion}</button>
         </div>
       </aside>
@@ -330,10 +349,11 @@ export function App() {
           </div>
         )}
         {inspectorTab === 'events' && <div className="inspector-scroll event-log">{activeEvents.length ? [...activeEvents].reverse().map((event) => <EventItem key={event.id} event={event} />) : <div className="panel-empty"><Activity size={24} /><strong>还没有 SDK 事件</strong><span>发送一条消息后，流式事件会显示在这里。</span></div>}</div>}
-        {inspectorTab === 'sdk' && <SdkPanel diagnostics={diagnostics} session={activeSession} eventCount={activeEvents.length} />}
+        {inspectorTab === 'sdk' && <SdkPanel diagnostics={diagnostics} session={activeSession} eventCount={activeEvents.length} onOpenLlmSettings={() => setLlmSettingsOpen(true)} />}
       </aside>
 
       {permission && <PermissionDialog request={permission} onDecision={(decision) => void resolvePermission(decision)} />}
+      {llmSettingsOpen && llmConfig && <LlmSettingsDialog config={llmConfig} onClose={() => setLlmSettingsOpen(false)} onSave={saveLlmConfig} onClear={clearLlmConfig} />}
     </main>
   )
 }
@@ -361,7 +381,7 @@ function PromptConfig({ config, patch }: { config: AgentConfig; patch: (value: P
   return <div className="config-panel"><section><h3>System Prompt</h3><Toggle label="使用 claude_code preset" hint="保留 SDK 的完整编码 Agent 行为" checked={config.useClaudeCodePreset} onChange={(value) => patch({ useClaudeCodePreset: value })} /><label className="field"><span>{config.useClaudeCodePreset ? '追加指令' : '完整 System Prompt'}</span><textarea rows={10} value={config.systemPrompt} onChange={(event) => patch({ systemPrompt: event.target.value })} /></label></section><section><h3>文件设置来源</h3><div className="source-options">{(['user', 'project', 'local'] as SettingSource[]).map((source) => <label key={source}><input type="checkbox" checked={config.settingSources.includes(source)} onChange={() => toggleSource(source)} /><span><strong>{source}</strong><small>{source === 'user' ? '~/.claude/settings.json' : source === 'project' ? '.claude/settings.json + CLAUDE.md' : '.claude/settings.local.json'}</small></span></label>)}</div></section><section><h3>结构化输出</h3><p className="section-help">可选 JSON Schema。留空时返回普通文本。</p><JsonEditor label="Output JSON Schema" value={config.outputSchemaJson} onChange={(value) => patch({ outputSchemaJson: value })} rows={9} /></section></div>
 }
 
-function SdkPanel({ diagnostics, session, eventCount }: { diagnostics?: AppDiagnostics; session: LabSession; eventCount: number }) {
+function SdkPanel({ diagnostics, session, eventCount, onOpenLlmSettings }: { diagnostics?: AppDiagnostics; session: LabSession; eventCount: number; onOpenLlmSettings: () => void }) {
   const rows = [['Agent SDK', diagnostics?.sdkVersion], ['Claude Code Session', session.sdkSessionId || '尚未初始化'], ['Electron', diagnostics?.electronVersion], ['Node.js', diagnostics?.nodeVersion], ['平台', `${diagnostics?.platform} / ${diagnostics?.arch}`], ['本次事件', String(eventCount)]]
-  return <div className="inspector-scroll sdk-panel"><div className="sdk-hero"><div className="brand-orbit"><BrainCircuit size={19} /></div><span className="eyebrow">RUNTIME DIAGNOSTICS</span><h3>真实 SDK，完整事件流</h3><p>AgentLab 在 Electron Main Process 中调用 Claude Agent SDK，Renderer 只通过受限 IPC 观察状态与处理授权。</p></div><div className="diagnostic-list">{rows.map(([label, value]) => <div key={label}><span>{label}</span><code title={value}>{value}</code></div>)}</div><div className="architecture-card"><strong>安全边界</strong><div><span>Renderer</span><i>IPC</i><span>Main</span><i>SDK</i><span>Claude</span></div><p>API Key 不进入前端；文件与命令工具由 SDK 子进程执行；敏感动作通过 canUseTool 回传授权。</p></div><button className="button secondary full" onClick={() => diagnostics && window.agentLab.revealPath(diagnostics.userDataPath)}><Folder size={14} />打开 AgentLab 数据目录</button></div>
+  return <div className="inspector-scroll sdk-panel"><div className="sdk-hero"><div className="brand-orbit"><BrainCircuit size={19} /></div><span className="eyebrow">RUNTIME DIAGNOSTICS</span><h3>真实 SDK，完整事件流</h3><p>AgentLab 在 Electron Main Process 中调用 Claude Agent SDK，Renderer 只通过受限 IPC 观察状态与处理授权。</p></div><div className="diagnostic-list">{rows.map(([label, value]) => <div key={label}><span>{label}</span><code title={value}>{value}</code></div>)}</div><div className="architecture-card"><strong>安全边界</strong><div><span>Renderer</span><i>IPC</i><span>Main</span><i>SDK</i><span>Claude</span></div><p>API Key 不进入前端；文件与命令工具由 SDK 子进程执行；敏感动作通过 canUseTool 回传授权。</p></div><button className="button primary full" onClick={onOpenLlmSettings}><KeyRound size={14} />配置 LLM API</button><button className="button secondary full sdk-secondary-button" onClick={() => diagnostics && window.agentLab.revealPath(diagnostics.userDataPath)}><Folder size={14} />打开 AgentLab 数据目录</button></div>
 }

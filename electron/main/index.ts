@@ -1,12 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
-import type { AgentConfig, AppDiagnostics, LabSession, PermissionDecision } from '../../src/shared/types'
+import { existsSync, readFileSync } from 'node:fs'
+import type { AgentConfig, AppDiagnostics, LabSession, LlmApiConfigInput, PermissionDecision } from '../../src/shared/types'
 import { AgentRuntime } from './agent-runtime'
 import { SessionStore } from './session-store'
+import { CredentialStore } from './credential-store'
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
@@ -16,6 +17,21 @@ const sdkVersion = (JSON.parse(readFileSync(path.join(path.dirname(sdkEntry), 'p
 let mainWindow: BrowserWindow | null = null
 let store: SessionStore
 let runtime: AgentRuntime
+let credentials: CredentialStore
+
+export const resolvePackagedClaudeExecutable = () => {
+  if (!app.isPackaged) return undefined
+  const packageName = `claude-agent-sdk-${process.platform}-${process.arch}`
+  const binaryName = process.platform === 'win32' ? 'claude.exe' : 'claude'
+  const unpackedRoot = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@anthropic-ai')
+  const candidates = [
+    path.join(unpackedRoot, 'claude-agent-sdk', 'node_modules', '@anthropic-ai', packageName, binaryName),
+    path.join(unpackedRoot, packageName, binaryName),
+  ]
+  const executable = candidates.find((candidate) => existsSync(candidate))
+  if (!executable) throw new Error(`Packaged Claude executable not found for ${process.platform}-${process.arch}`)
+  return executable
+}
 
 const createWindow = async () => {
   mainWindow = new BrowserWindow({
@@ -56,10 +72,10 @@ const registerIpc = () => {
       nodeVersion: process.versions.node,
       electronVersion: process.versions.electron,
       sdkVersion,
-      apiKeyConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
+      apiKeyConfigured: credentials.publicConfig().apiKeyConfigured,
       userDataPath: app.getPath('userData'),
     }
-    return { ...persisted, diagnostics }
+    return { ...persisted, diagnostics, llmConfig: credentials.publicConfig() }
   })
 
   ipcMain.handle('session:create', (_event, config?: Partial<AgentConfig>) => store.create(config))
@@ -84,16 +100,23 @@ const registerIpc = () => {
     return result.canceled ? null : result.filePaths[0]
   })
   ipcMain.handle('shell:reveal-path', async (_event, targetPath: string) => shell.openPath(targetPath))
+  ipcMain.handle('llm:get-config', () => credentials.publicConfig())
+  ipcMain.handle('llm:save-config', (_event, config: LlmApiConfigInput) => credentials.save(config))
+  ipcMain.handle('llm:clear-config', () => credentials.clear())
 }
 
 app.whenReady().then(async () => {
   store = new SessionStore(app.getPath('userData'), homedir())
+  credentials = new CredentialStore(app.getPath('userData'), safeStorage)
+  await credentials.load()
   await store.load()
   if (store.snapshot().sessions.length === 0) await store.create()
   runtime = new AgentRuntime(
     store,
     (event) => mainWindow?.webContents.send('agent:event', event),
     (request) => mainWindow?.webContents.send('agent:permission', request),
+    () => credentials.environment(),
+    resolvePackagedClaudeExecutable,
   )
   registerIpc()
   await createWindow()

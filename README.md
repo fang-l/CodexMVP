@@ -19,6 +19,8 @@ AgentLab 是一个基于 Electron、React 和 **Claude Agent SDK** 的本地 Age
 - Pre/Post Tool、Subagent、Compact、Stop Hooks 观察；
 - 原始 SDK 事件、工具输入/结果、运行状态、成本和 Token Usage 检查；
 - 下一步 Prompt Suggestion；
+- 应用内 LLM Provider、Base URL、模型和 API Key 配置；
+- API Key 使用 Electron `safeStorage`/macOS Keychain 加密保存，且从工具子进程环境中清除；
 - AgentLab 自身会话元数据的原子 JSON 持久化。
 
 ## 启动
@@ -32,6 +34,14 @@ npm run dev
 ```
 
 SDK 也支持 Bedrock、Vertex、Foundry 等官方认证方式。AgentLab 不会把 API Key 发送到 Renderer，也不会将它写入本地状态文件；SDK 子进程从 Electron Main Process 的环境变量继承认证信息。
+
+也可以点击左下角“配置 LLM API”，在应用内选择：
+
+- Anthropic API：通常只需 API Key，Base URL 留空；
+- Anthropic 兼容网关：填写教程提供的 Base URL，并选择 `X-Api-Key` 或 `Bearer Token`；
+- 使用启动环境变量：继续使用 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 和 `ANTHROPIC_MODEL`。
+
+应用内凭据被整体加密保存到用户数据目录的 `llm-credentials.json`。该文件不含明文 Key；如果操作系统安全存储不可用，AgentLab 会拒绝保存。运行 Agent 时还会设置 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`，防止 Bash、Hooks 和 stdio MCP 子进程读取模型凭据。
 
 ## 验证与打包
 
@@ -64,7 +74,7 @@ flowchart LR
 
 1. Renderer 只负责 UI，不拥有 Node.js 权限，也不接触 API Key。
 2. Preload 只暴露固定的类型化 IPC 方法。
-3. Main Process 管理窗口、会话元数据和 SDK 生命周期。
+3. Main Process 管理窗口、加密凭据、会话元数据和 SDK 生命周期。
 4. `AgentRuntime` 将 UI 配置转换为真实 SDK `Options`，并把 `SDKMessage` 归一化为 UI 事件。
 5. 工具真正由 SDK/Claude Code 子进程执行；AgentLab 不复刻或旁路 SDK 的 Harness。
 6. Claude SDK 持久化完整 JSONL transcript；AgentLab 另存轻量 UI 会话，二者用 `sdkSessionId` 连接。
@@ -90,6 +100,7 @@ flowchart LR
 
 ```text
 electron/main/agent-runtime.ts  SDK options、事件归一化、权限等待与中断
+electron/main/credential-store.ts API 配置和系统加密凭据存储
 electron/main/session-store.ts  AgentLab UI 会话持久化
 electron/main/index.ts          Electron 生命周期与 IPC
 electron/preload/index.ts       Renderer 的最小能力桥

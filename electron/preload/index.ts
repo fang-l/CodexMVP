@@ -11,6 +11,9 @@ const api: AgentLabApi = {
   resolvePermission: (requestId, decision) => ipcRenderer.invoke('permission:resolve', requestId, decision),
   chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
   revealPath: (path) => ipcRenderer.invoke('shell:reveal-path', path),
+  getLlmConfig: () => ipcRenderer.invoke('llm:get-config'),
+  saveLlmConfig: (config) => ipcRenderer.invoke('llm:save-config', config),
+  clearLlmConfig: () => ipcRenderer.invoke('llm:clear-config'),
   onEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: RuntimeEvent) => listener(payload)
     ipcRenderer.on('agent:event', handler)

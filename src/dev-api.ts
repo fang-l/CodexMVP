@@ -14,6 +14,7 @@ export function createBrowserPreviewApi(): AgentLabApi {
   }]
   const eventListeners = new Set<(event: RuntimeEvent) => void>()
   const permissionListeners = new Set<(request: PermissionRequest) => void>()
+  let llmConfig: AppSnapshot['llmConfig'] = { provider: 'anthropic', baseUrl: '', model: '', authMode: 'api_key', apiKeyConfigured: false, maskedApiKey: '', source: 'none', encryptionAvailable: true }
   const snapshot = (): AppSnapshot => ({
     sessions: structuredClone(sessions),
     activeSessionId: sessions[0]?.id,
@@ -21,6 +22,7 @@ export function createBrowserPreviewApi(): AgentLabApi {
       platform: 'darwin', arch: 'arm64', nodeVersion: '22.x', electronVersion: '35.x',
       sdkVersion: '0.3.216', apiKeyConfigured: false, userDataPath: '/preview/AgentLab',
     },
+    llmConfig,
   })
   return {
     load: async () => snapshot(),
@@ -39,6 +41,15 @@ export function createBrowserPreviewApi(): AgentLabApi {
     resolvePermission: async () => undefined,
     chooseDirectory: async () => null,
     revealPath: async () => undefined,
+    getLlmConfig: async () => structuredClone(llmConfig),
+    saveLlmConfig: async (input) => {
+      llmConfig = { provider: input.provider, baseUrl: input.baseUrl, model: input.model, authMode: input.authMode, apiKeyConfigured: Boolean(input.apiKey) || llmConfig.apiKeyConfigured, maskedApiKey: input.apiKey ? `••••••••${input.apiKey.slice(-4)}` : llmConfig.maskedApiKey, source: 'app', encryptionAvailable: true, updatedAt: Date.now() }
+      return structuredClone(llmConfig)
+    },
+    clearLlmConfig: async () => {
+      llmConfig = { provider: 'anthropic', baseUrl: '', model: '', authMode: 'api_key', apiKeyConfigured: false, maskedApiKey: '', source: 'none', encryptionAvailable: true }
+      return structuredClone(llmConfig)
+    },
     onEvent: (listener) => { eventListeners.add(listener); return () => eventListeners.delete(listener) },
     onPermission: (listener) => { permissionListeners.add(listener); return () => permissionListeners.delete(listener) },
   }

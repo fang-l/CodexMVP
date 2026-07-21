@@ -51,6 +51,8 @@ export class AgentRuntime {
     private readonly store: SessionStore,
     private readonly emit: EventSink,
     private readonly requestPermission: PermissionSink,
+    private readonly getLlmEnvironment: () => Record<string, string | undefined>,
+    private readonly getClaudeExecutablePath: () => string | undefined,
   ) {}
 
   async run(sessionId: string, prompt: string) {
@@ -149,6 +151,7 @@ export class AgentRuntime {
       cwd: config.cwd || process.cwd(),
       model: config.model || undefined,
       fallbackModel: config.fallbackModel || undefined,
+      pathToClaudeCodeExecutable: this.getClaudeExecutablePath(),
       permissionMode: config.permissionMode,
       allowDangerouslySkipPermissions: config.permissionMode === 'bypassPermissions',
       effort: config.effort,
@@ -181,6 +184,7 @@ export class AgentRuntime {
       persistSession: true,
       env: {
         ...process.env,
+        ...this.getLlmEnvironment(),
         CLAUDE_AGENT_SDK_CLIENT_APP: 'agent-lab-desktop/0.1.0',
       },
       hooks: {

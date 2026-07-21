@@ -8,6 +8,28 @@ export type PermissionMode =
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type SettingSource = 'user' | 'project' | 'local'
+export type LlmProvider = 'anthropic' | 'compatible' | 'environment'
+export type LlmAuthMode = 'api_key' | 'bearer'
+
+export interface LlmApiConfigInput {
+  provider: LlmProvider
+  baseUrl: string
+  model: string
+  authMode: LlmAuthMode
+  apiKey: string
+}
+
+export interface LlmApiConfigPublic {
+  provider: LlmProvider
+  baseUrl: string
+  model: string
+  authMode: LlmAuthMode
+  apiKeyConfigured: boolean
+  maskedApiKey: string
+  source: 'app' | 'environment' | 'none'
+  encryptionAvailable: boolean
+  updatedAt?: number
+}
 
 export interface ThinkingConfig {
   mode: 'adaptive' | 'enabled' | 'disabled'
@@ -134,6 +156,7 @@ export interface AppSnapshot {
   sessions: LabSession[]
   activeSessionId?: string
   diagnostics: AppDiagnostics
+  llmConfig: LlmApiConfigPublic
 }
 
 export interface AgentLabApi {
@@ -146,6 +169,9 @@ export interface AgentLabApi {
   resolvePermission(requestId: string, decision: PermissionDecision): Promise<void>
   chooseDirectory(): Promise<string | null>
   revealPath(path: string): Promise<void>
+  getLlmConfig(): Promise<LlmApiConfigPublic>
+  saveLlmConfig(config: LlmApiConfigInput): Promise<LlmApiConfigPublic>
+  clearLlmConfig(): Promise<LlmApiConfigPublic>
   onEvent(listener: (event: RuntimeEvent) => void): () => void
   onPermission(listener: (request: PermissionRequest) => void): () => void
 }
