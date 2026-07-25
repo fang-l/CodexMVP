@@ -228,6 +228,22 @@ export function App() {
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, status: 'running' } : session))
   }
 
+  const interrupt = async () => {
+    if (!activeSession) return
+    const sessionId = activeSession.id
+    // Release the composer immediately. The main process will still ask the SDK
+    // to stop, but that cleanup must not leave the user trapped in a run state.
+    if (permission?.sessionId === sessionId) setPermission(undefined)
+    setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, status: 'idle' } : session))
+    try {
+      await window.agentLab.interrupt(sessionId)
+    } catch (error) {
+      setSessions((current) => current.map((session) => session.id === sessionId
+        ? { ...session, status: 'error', messages: [...session.messages, createLocalMessage('error', error instanceof Error ? error.message : String(error))] }
+        : session))
+    }
+  }
+
   const deleteSession = async (sessionId: string) => {
     if (!window.confirm('删除这个 AgentLab 实验记录？Claude SDK 自己保存的 JSONL 会话不会被删除。')) return
     await window.agentLab.deleteSession(sessionId)
@@ -253,6 +269,7 @@ export function App() {
   if (loading || !activeSession) return <div className="loading-screen"><div className="brand-orbit"><Sparkles size={20} /></div><span>正在启动 AgentLab…</span></div>
 
   const config = activeSession.config
+  const effectiveModel = config.model || llmConfig?.model || 'SDK 默认模型'
   const isRunning = activeSession.status === 'running' || activeSession.status === 'waiting_permission'
 
   return (
@@ -288,7 +305,7 @@ export function App() {
           <div className="session-heading"><h2>{activeSession.title}</h2><span className={clsx('run-state', activeSession.status)}>{activeSession.status === 'waiting_permission' ? '等待授权' : activeSession.status === 'running' ? '运行中' : activeSession.status === 'error' ? '错误' : '就绪'}</span></div>
           <button className="cwd-picker" onClick={chooseDirectory} title={config.cwd}><Folder size={15} /><span>{config.cwd || '选择工作区'}</span><ChevronDown size={13} /></button>
           <div className="top-actions">
-            <span className="model-chip"><Bot size={14} />{config.model || 'SDK 默认模型'}</span>
+            <span className="model-chip" title={effectiveModel}><Bot size={14} />{effectiveModel}</span>
             <button className="icon-button" onClick={() => setInspectorOpen((value) => !value)}>{inspectorOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
           </div>
         </header>
@@ -325,7 +342,7 @@ export function App() {
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={isRunning ? 'Agent 正在工作…' : '给 Agent 一个任务，或输入 / 查看可用命令'} disabled={isRunning} rows={1} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} />
             <div className="composer-toolbar">
               <div className="composer-context"><span><Command size={13} /> {config.permissionMode}</span><span><Gauge size={13} /> {config.effort}</span><span><Wrench size={13} /> {config.tools.length} tools</span></div>
-              {isRunning ? <button className="send-button stop" onClick={() => window.agentLab.interrupt(activeSession.id)}><Square size={14} fill="currentColor" /></button> : <button className="send-button" disabled={!prompt.trim()} onClick={() => void send()}><Send size={15} /></button>}
+              {isRunning ? <button className="send-button stop" onClick={() => void interrupt()} title="停止当前任务"><Square size={14} fill="currentColor" /></button> : <button className="send-button" disabled={!prompt.trim()} onClick={() => void send()}><Send size={15} /></button>}
             </div>
           </div>
           <p className="composer-note">Agent 可能修改文件或执行命令。请检查权限请求与变更结果。</p>

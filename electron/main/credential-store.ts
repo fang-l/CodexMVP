@@ -23,6 +23,12 @@ const defaultConfig = (): LlmApiConfigInput => ({
 })
 
 const maskSecret = (secret: string) => (secret ? `••••••••${secret.slice(-4)}` : '')
+const MINIMAX_ANTHROPIC_URL = 'https://api.minimaxi.com/anthropic'
+
+const resolveModel = (config: Pick<LlmApiConfigInput, 'baseUrl' | 'model'>) => {
+  if (config.model.trim()) return config.model.trim()
+  return config.baseUrl.replace(/\/+$/, '') === MINIMAX_ANTHROPIC_URL ? 'MiniMax-M2.7' : ''
+}
 
 export class CredentialStore {
   private readonly filePath: string
@@ -45,6 +51,7 @@ export class CredentialStore {
           this.secretStorage.decryptString(Buffer.from(stored.encrypted, 'base64')),
         ) as LlmApiConfigInput),
       }
+      this.config.model = resolveModel(this.config)
       this.updatedAt = stored.updatedAt
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -60,7 +67,7 @@ export class CredentialStore {
     return {
       provider: this.config.provider,
       baseUrl: this.config.baseUrl || process.env.ANTHROPIC_BASE_URL || '',
-      model: this.config.model || process.env.ANTHROPIC_MODEL || '',
+      model: resolveModel(this.config) || process.env.ANTHROPIC_MODEL || '',
       authMode: this.config.authMode,
       apiKeyConfigured: hasStoredKey || Boolean(envKey),
       maskedApiKey: maskSecret(hasStoredKey ? this.config.apiKey : envKey),
@@ -82,7 +89,11 @@ export class CredentialStore {
     if (input.provider !== 'environment' && !apiKey && !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
       throw new Error('请填写 API Key，或选择“使用启动环境”。')
     }
-    this.config = { ...input, baseUrl, model: input.model.trim(), apiKey }
+    const model = resolveModel({ baseUrl, model: input.model })
+    if (input.provider !== 'environment' && !model) {
+      throw new Error('请填写默认模型，避免 SDK 回退到本机 Claude Code 配置。')
+    }
+    this.config = { ...input, baseUrl, model, apiKey }
     this.updatedAt = Date.now()
     const stored: StoredCredentials = {
       version: 1,
@@ -111,7 +122,7 @@ export class CredentialStore {
       ANTHROPIC_API_KEY: this.config.authMode === 'api_key' ? secret : undefined,
       ANTHROPIC_AUTH_TOKEN: this.config.authMode === 'bearer' ? secret : undefined,
       ANTHROPIC_BASE_URL: this.config.baseUrl || undefined,
-      ANTHROPIC_MODEL: this.config.model || undefined,
+      ANTHROPIC_MODEL: resolveModel(this.config) || undefined,
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: secret ? '1' : process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
     }
   }

@@ -1,6 +1,6 @@
 {
   "name": "agent-lab-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "An Electron workbench for learning and experimenting with the Claude Agent SDK.",
@@ -50,6 +50,9 @@
   "build": {
     "appId": "dev.agentlab.desktop",
     "productName": "AgentLab",
+    "directories": {
+      "output": "release-candidate"
+    },
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
@@ -65,9 +68,19 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dmg", "zip"]
+      "target": [
+        "dmg",
+        "zip"
+      ]
     },
-    "win": { "target": "nsis" },
-    "linux": { "target": ["AppImage", "deb"] }
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    }
   }
 }
