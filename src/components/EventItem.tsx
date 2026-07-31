@@ -4,6 +4,7 @@ import clsx from 'clsx'
 import type { RuntimeEvent } from '../shared/types'
 
 const icons = {
+  system_context: Code2,
   assistant: Sparkles,
   assistant_delta: Sparkles,
   thinking: Gauge,

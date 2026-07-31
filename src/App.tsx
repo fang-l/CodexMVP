@@ -29,6 +29,7 @@ import {
 import clsx from 'clsx'
 import { Markdown } from './components/Markdown'
 import { EventItem } from './components/EventItem'
+import { RunTimeline } from './components/RunTimeline'
 import { PermissionDialog } from './components/PermissionDialog'
 import { LlmSettingsDialog } from './components/LlmSettingsDialog'
 import type {
@@ -49,6 +50,7 @@ import { DEFAULT_TOOLS } from './shared/types'
 
 type InspectorTab = 'run' | 'events' | 'sdk'
 type ConfigTab = 'runtime' | 'tools' | 'extensions' | 'prompt'
+type EventView = 'steps' | 'raw'
 
 const createLocalMessage = (role: ChatMessage['role'], content: string): ChatMessage => ({
   id: crypto.randomUUID(),
@@ -113,6 +115,7 @@ export function App() {
   const [permission, setPermission] = useState<PermissionRequest>()
   const [prompt, setPrompt] = useState('')
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('run')
+  const [eventView, setEventView] = useState<EventView>('steps')
   const [configTab, setConfigTab] = useState<ConfigTab>('runtime')
   const [inspectorOpen, setInspectorOpen] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -365,7 +368,17 @@ export function App() {
             {configTab === 'prompt' && <PromptConfig config={config} patch={patchConfig} />}
           </div>
         )}
-        {inspectorTab === 'events' && <div className="inspector-scroll event-log">{activeEvents.length ? [...activeEvents].reverse().map((event) => <EventItem key={event.id} event={event} />) : <div className="panel-empty"><Activity size={24} /><strong>还没有 SDK 事件</strong><span>发送一条消息后，流式事件会显示在这里。</span></div>}</div>}
+        {inspectorTab === 'events' && (
+          <div className="event-panel">
+            <div className="event-view-switch" role="tablist" aria-label="事件展示方式">
+              <button role="tab" aria-selected={eventView === 'steps'} className={eventView === 'steps' ? 'active' : ''} onClick={() => setEventView('steps')}>步骤时间线</button>
+              <button role="tab" aria-selected={eventView === 'raw'} className={eventView === 'raw' ? 'active' : ''} onClick={() => setEventView('raw')}>原始事件 <span>{activeEvents.length}</span></button>
+            </div>
+            {eventView === 'steps'
+              ? <div className="inspector-scroll"><RunTimeline events={activeEvents} /></div>
+              : <div className="inspector-scroll event-log">{activeEvents.length ? [...activeEvents].reverse().map((event) => <EventItem key={event.id} event={event} />) : <div className="panel-empty"><Activity size={24} /><strong>还没有 SDK 事件</strong><span>发送一条消息后，流式事件会显示在这里。</span></div>}</div>}
+          </div>
+        )}
         {inspectorTab === 'sdk' && <SdkPanel diagnostics={diagnostics} session={activeSession} eventCount={activeEvents.length} onOpenLlmSettings={() => setLlmSettingsOpen(true)} />}
       </aside>
 

@@ -86,6 +86,7 @@ export interface LabSession {
 }
 
 export type RuntimeEventKind =
+  | 'system_context'
   | 'assistant_delta'
   | 'assistant'
   | 'thinking'

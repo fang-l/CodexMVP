@@ -20,9 +20,12 @@ import type {
   RuntimeEvent,
 } from '../../src/shared/types'
 import type { SessionStore } from './session-store'
+import { createSafeRunContext } from './safe-run-context'
 
 interface PermissionWaiter {
   sessionId: string
+  toolName: string
+  toolUseId: string
   resolve: (result: PermissionResult) => void
   suggestions?: PermissionUpdate[]
   input: Record<string, unknown>
@@ -84,7 +87,7 @@ export class AgentRuntime {
     this.runs.set(sessionId, run)
 
     try {
-      const options = this.buildOptions(session, run)
+      const options = this.buildOptions(session, run, prompt)
       const activeQuery = query({ prompt, options })
       run.query = activeQuery
 
@@ -132,6 +135,14 @@ export class AgentRuntime {
     if (!pending) throw new Error('这个权限请求已经失效。')
     this.pendingPermissions.delete(requestId)
 
+    const decisionLabel = decision === 'deny' ? '已拒绝' : decision === 'allow_session' ? '本会话允许' : '允许一次'
+    this.event(pending.sessionId, 'permission', `权限决定：${pending.toolName}`, decisionLabel, {
+      decision,
+    }, {
+      toolName: pending.toolName,
+      toolUseId: pending.toolUseId,
+    })
+
     if (decision === 'deny') {
       pending.resolve({
         behavior: 'deny',
@@ -149,7 +160,7 @@ export class AgentRuntime {
     })
   }
 
-  private buildOptions(session: LabSession, run: ActiveRun): Options {
+  private buildOptions(session: LabSession, run: ActiveRun, prompt: string): Options {
     const config = session.config
     const configuredEnvironment = this.getLlmEnvironment()
     const usesApplicationCredentials = Boolean(
@@ -175,6 +186,14 @@ export class AgentRuntime {
     const endpointHost = configuredEnvironment.ANTHROPIC_BASE_URL
       ? new URL(configuredEnvironment.ANTHROPIC_BASE_URL).host
       : 'api.anthropic.com'
+
+    this.event(
+      session.id,
+      'system_context',
+      '系统上下文',
+      '已生成安全摘要',
+      createSafeRunContext(prompt, config, effectiveModel),
+    )
     const mcpServers = parseJson<Record<string, McpServerConfig>>(config.mcpServersJson, 'MCP Servers', {})
     const agents = parseJson<Record<string, AgentDefinition>>(config.agentsJson, 'Subagents', {})
     const plugins = parseJson<SdkPluginConfig[]>(config.pluginsJson, 'Plugins', [])
@@ -249,6 +268,8 @@ export class AgentRuntime {
         await this.store.update(session.id, { status: 'waiting_permission' })
         this.pendingPermissions.set(requestId, {
           sessionId: session.id,
+          toolName,
+          toolUseId: details.toolUseID,
           resolve: () => undefined,
           suggestions: details.suggestions,
           input,

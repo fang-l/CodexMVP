@@ -2,8 +2,11 @@ node_modules/
 dist/
 dist-electron/
 release/
+release-*/
 *.log
 .DS_Store
+.feynman/
+~$*.docx
 .env
 .env.*
 !.env.example
