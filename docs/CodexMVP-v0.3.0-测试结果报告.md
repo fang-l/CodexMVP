@@ -31,7 +31,7 @@
 | --- | ---: | --- |
 | passed | 9 | P0 自动化与候选包核验通过 |
 | manual_required | 3 | 需要人工 GUI 或具备真实 LLM 凭据 |
-| environment_blocked | 1 | MCP/ROS/车辆扩展环境不在本机 |
+| environment_blocked | 2 | 真实 LLM 与 MCP/ROS/车辆环境未配置 |
 | failed | 0 | 无失败项 |
 
 ## 4. 详细结果
