@@ -2,7 +2,7 @@
 
 AgentLab 是一个基于 Electron、React 和 **Claude Agent SDK** 的本地 Agent 实验台。它不是用普通 Messages API 模拟工具调用，而是直接把 `@anthropic-ai/claude-agent-sdk` 作为运行核心，复用 Claude Code 同源的 Agent Loop、内置工具、上下文管理、Session、权限、Hooks、MCP 和 Subagent 能力。
 
-> 当前版本：MVP `0.1.0`。产品使用独立品牌，不复制 Claude Code 的品牌和视觉资产。
+> 当前版本：`v0.3.0`。产品使用独立品牌，不复制 Claude Code/Codex App 的品牌和视觉资产。
 
 ## 已实现能力
 

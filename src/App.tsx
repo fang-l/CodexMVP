@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
+  CheckCircle2,
   Bot,
   BrainCircuit,
   ChevronDown,
@@ -8,6 +9,7 @@ import {
   Command,
   FileCode2,
   Folder,
+  GitBranch,
   Gauge,
   KeyRound,
   Menu,
@@ -15,12 +17,12 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Play,
-  Plus,
   Send,
   Settings2,
   ShieldCheck,
   Sparkles,
   Square,
+  RefreshCw,
   TerminalSquare,
   Trash2,
   Wrench,
@@ -44,11 +46,18 @@ import type {
   PermissionMode,
   PermissionRequest,
   RuntimeEvent,
+  GitWorkspaceStatus,
+  GitDiffView,
+  VerificationCommand,
+  VerificationRun,
+  FileTreeEntry,
+  SubagentRun,
+  SandboxProfile,
   SettingSource,
 } from './shared/types'
 import { DEFAULT_TOOLS } from './shared/types'
 
-type InspectorTab = 'run' | 'events' | 'sdk'
+type InspectorTab = 'run' | 'changes' | 'verify' | 'events' | 'sdk'
 type ConfigTab = 'runtime' | 'tools' | 'extensions' | 'prompt'
 type EventView = 'steps' | 'raw'
 
@@ -123,12 +132,40 @@ export function App() {
   const [loading, setLoading] = useState(true)
   const [llmConfig, setLlmConfig] = useState<LlmApiConfigPublic>()
   const [llmSettingsOpen, setLlmSettingsOpen] = useState(false)
+  const [gitStatus, setGitStatus] = useState<GitWorkspaceStatus>()
+  const [gitDiff, setGitDiff] = useState<GitDiffView>()
+  const [files, setFiles] = useState<FileTreeEntry[]>([])
+  const [verificationCommands, setVerificationCommands] = useState<VerificationCommand[]>([])
+  const [verificationRuns, setVerificationRuns] = useState<VerificationRun[]>([])
+  const [subagents, setSubagents] = useState<SubagentRun[]>([])
+  const [workbenchError, setWorkbenchError] = useState('')
   const saveTimer = useRef<number | undefined>(undefined)
   const transcriptRef = useRef<HTMLDivElement>(null)
 
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const activeEvents = activeSessionId ? events[activeSessionId] ?? [] : []
   const activeStream = activeSessionId ? streamingText[activeSessionId] ?? '' : ''
+
+  const refreshWorkbench = useCallback(async (sessionId: string) => {
+    try {
+      const [status, commands, runs, tree, persistedEvents, persistedSubagents] = await Promise.all([
+        window.agentLab.getGitStatus(sessionId),
+        window.agentLab.discoverVerifications(sessionId),
+        window.agentLab.listVerifications(sessionId),
+        window.agentLab.listFiles(sessionId).catch(() => []),
+        window.agentLab.listPersistedEvents(sessionId),
+        window.agentLab.listSubagents(sessionId),
+      ])
+      setGitStatus(status); setVerificationCommands(commands); setVerificationRuns(runs); setFiles(tree); setSubagents(persistedSubagents)
+      setEvents((current) => {
+        const merged = [...persistedEvents, ...(current[sessionId] ?? [])]
+        return { ...current, [sessionId]: [...new Map(merged.map((item) => [item.id, item])).values()].sort((a, b) => a.timestamp - b.timestamp).slice(-1000) }
+      })
+      if (status.available) setGitDiff(await window.agentLab.getGitDiff(sessionId, 'unstaged'))
+      else setGitDiff(undefined)
+      setWorkbenchError('')
+    } catch (error) { setWorkbenchError(error instanceof Error ? error.message : String(error)) }
+  }, [])
 
   useEffect(() => {
     let disposed = false
@@ -161,7 +198,9 @@ export function App() {
         setSessions((current) => current.map((session) => session.id === event.sessionId
           ? { ...session, status: 'idle', lastResult: event.data as LabSession['lastResult'] }
           : session))
+        void refreshWorkbench(event.sessionId)
       }
+      if (event.kind === 'subagent') void window.agentLab.listSubagents(event.sessionId).then(setSubagents)
       if (event.kind === 'status') {
         const nextStatus = event.label.includes('运行') ? 'running' : 'idle'
         setSessions((current) => current.map((session) => session.id === event.sessionId ? { ...session, status: nextStatus } : session))
@@ -178,7 +217,9 @@ export function App() {
       setSessions((current) => current.map((session) => session.id === request.sessionId ? { ...session, status: 'waiting_permission' } : session))
     })
     return () => { disposed = true; stopEvents(); stopPermissions() }
-  }, [])
+  }, [refreshWorkbench])
+
+  useEffect(() => { if (activeSessionId) void refreshWorkbench(activeSessionId) }, [activeSessionId, activeSession?.config.cwd, refreshWorkbench])
 
   useEffect(() => {
     transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: 'smooth' })
@@ -355,6 +396,8 @@ export function App() {
       <aside className="inspector">
         <div className="inspector-tabs">
           <button className={inspectorTab === 'run' ? 'active' : ''} onClick={() => setInspectorTab('run')}><Settings2 size={14} />运行配置</button>
+          <button className={inspectorTab === 'changes' ? 'active' : ''} onClick={() => setInspectorTab('changes')}><GitBranch size={14} />变更 <span>{gitStatus?.files.length ?? 0}</span></button>
+          <button className={inspectorTab === 'verify' ? 'active' : ''} onClick={() => setInspectorTab('verify')}><CheckCircle2 size={14} />验证</button>
           <button className={inspectorTab === 'events' ? 'active' : ''} onClick={() => setInspectorTab('events')}><Activity size={14} />事件 <span>{activeEvents.length}</span></button>
           <button className={inspectorTab === 'sdk' ? 'active' : ''} onClick={() => setInspectorTab('sdk')}><BrainCircuit size={14} />SDK</button>
         </div>
@@ -368,6 +411,8 @@ export function App() {
             {configTab === 'prompt' && <PromptConfig config={config} patch={patchConfig} />}
           </div>
         )}
+        {inspectorTab === 'changes' && <GitPanel sessionId={activeSession.id} status={gitStatus} diff={gitDiff} files={files} error={workbenchError} onRefresh={() => refreshWorkbench(activeSession.id)} onStatus={setGitStatus} onDiff={setGitDiff} />}
+        {inspectorTab === 'verify' && <VerificationPanel sessionId={activeSession.id} commands={verificationCommands} runs={verificationRuns} subagents={subagents} onRuns={setVerificationRuns} onReview={() => send('请调用 reviewer 子 Agent 对当前工作区的未提交变更做只读审查。必须等待 reviewer 进入终态后再汇总；按 critical/high/medium/low 输出具体问题、文件和行号，不要修改文件。')} onUseResult={(run) => setPrompt(`请修复以下验证失败，并在完成后重新运行验证：\n\n命令：${run.command.executable} ${run.command.args.join(' ')}\n退出码：${run.exitCode}\n\n${run.output.slice(-12000)}`)} />}
         {inspectorTab === 'events' && (
           <div className="event-panel">
             <div className="event-view-switch" role="tablist" aria-label="事件展示方式">
@@ -388,11 +433,49 @@ export function App() {
   )
 }
 
+function GitPanel({ sessionId, status, diff, files, error, onRefresh, onStatus, onDiff }: {
+  sessionId: string; status?: GitWorkspaceStatus; diff?: GitDiffView; files: FileTreeEntry[]; error: string
+  onRefresh: () => Promise<void>; onStatus: (status: GitWorkspaceStatus) => void; onDiff: (diff: GitDiffView) => void
+}) {
+  const [scope, setScope] = useState<'unstaged' | 'staged'>('unstaged')
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState('')
+  const act = async (label: string, operation: () => Promise<GitWorkspaceStatus>) => {
+    setBusy(label)
+    try { onStatus(await operation()); onDiff(await window.agentLab.getGitDiff(sessionId, scope)) } finally { setBusy('') }
+  }
+  const switchScope = async (value: 'unstaged' | 'staged') => { setScope(value); onDiff(await window.agentLab.getGitDiff(sessionId, value)) }
+  const token = status?.stateToken ?? ''
+  return <div className="inspector-scroll config-panel workbench-panel">
+    <section><div className="panel-title-row"><h3>Git 工作区</h3><button className="icon-button" onClick={() => void onRefresh()}><RefreshCw size={14} /></button></div>
+      {!status?.available ? <div className="warning-box">{status?.error || error || '当前目录不是 Git 仓库。'}</div> : <><p className="section-help"><GitBranch size={13} /> {status.branch || 'detached HEAD'} · ahead {status.ahead} / behind {status.behind}</p>
+      <div className="change-list">{status.files.length ? status.files.map((file) => <div className="change-row" key={`${file.originalPath}-${file.path}`}><code>{file.indexStatus}{file.worktreeStatus}</code><span title={file.path}>{file.path}</span><div>{file.indexStatus !== ' ' && file.indexStatus !== '?' && <button disabled={Boolean(busy)} onClick={() => void act(file.path, () => window.agentLab.unstageGitFile(sessionId, file.path, token))}>取消暂存</button>}{file.worktreeStatus !== ' ' && <button disabled={Boolean(busy)} onClick={() => void act(file.path, () => window.agentLab.stageGitFile(sessionId, file.path, token))}>暂存</button>}{!file.untracked && file.worktreeStatus !== ' ' && <button disabled={Boolean(busy)} onClick={() => window.confirm(`撤销 ${file.path} 的未暂存修改？此操作不可恢复。`) && void act(file.path, () => window.agentLab.revertGitFile(sessionId, file.path, token, true))}>撤销</button>}</div></div>) : <p className="section-help">工作区干净。</p>}</div></>}
+    </section>
+    {status?.available && <section><div className="event-view-switch"><button className={scope === 'unstaged' ? 'active' : ''} onClick={() => void switchScope('unstaged')}>未暂存</button><button className={scope === 'staged' ? 'active' : ''} onClick={() => void switchScope('staged')}>已暂存</button></div><pre className="diff-view">{diff?.patch || '没有差异'}</pre></section>}
+    {status?.available && <section><h3>创建 Commit</h3><textarea rows={3} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="feat: describe the change"/><button className="button primary full" disabled={!message.trim() || Boolean(busy)} onClick={async () => { setBusy('commit'); try { const result = await window.agentLab.commitGit(sessionId, message, token); setMessage(''); onStatus(result.status); onDiff(await window.agentLab.getGitDiff(sessionId, scope)) } finally { setBusy('') } }}>提交已暂存变更</button></section>}
+    <section><h3>文件树</h3><div className="file-tree">{files.map((entry) => <div key={entry.path}><span>{entry.kind === 'directory' ? '▸' : '·'}</span><code>{entry.path}</code></div>)}</div></section>
+  </div>
+}
+
+function VerificationPanel({ sessionId, commands, runs, subagents, onRuns, onReview, onUseResult }: { sessionId: string; commands: VerificationCommand[]; runs: VerificationRun[]; subagents: SubagentRun[]; onRuns: (runs: VerificationRun[]) => void; onReview: () => Promise<void>; onUseResult: (run: VerificationRun) => void }) {
+  const [running, setRunning] = useState('')
+  const runCommand = async (command: VerificationCommand) => {
+    setRunning(command.id)
+    try { const result = await window.agentLab.runVerification(sessionId, command.id); onRuns([result, ...runs.filter((item) => item.id !== result.id)]) } finally { setRunning('') }
+  }
+  return <div className="inspector-scroll config-panel workbench-panel">
+    <section><h3>基础只读 Review</h3><p className="section-help">Reviewer 被限制为 Read、Glob、Grep，并强制前台完成后再由主 Agent 汇总。</p><button className="button secondary full" onClick={() => void onReview()}><ShieldCheck size={14}/>审查当前未提交变更</button></section>
+    <section><h3>验证命令</h3><p className="section-help">从 package.json 自动发现，使用固定参数执行并保存完整结果。</p><div className="verification-list">{commands.map((command) => <button key={command.id} disabled={Boolean(running)} onClick={() => void runCommand(command)}><Play size={13}/><span>npm run {command.label}</span>{running === command.id && <em>运行中</em>}</button>)}</div></section>
+    <section><h3>最近结果</h3>{runs.length ? runs.map((run) => <details key={run.id}><summary><span className={clsx('verification-status', run.status)}>{run.status}</span><code>{run.command.label}</code><small>{run.durationMs ? `${(run.durationMs / 1000).toFixed(1)}s` : ''}</small></summary><pre className="diff-view">{run.output || '无输出'}</pre>{run.status === 'failed' && <button className="button secondary full" onClick={() => onUseResult(run)}>作为修复 Prompt</button>}</details>) : <p className="section-help">尚未运行验证。</p>}</section>
+    <section><h3>子 Agent 生命周期</h3>{subagents.length ? subagents.map((agent) => <div className="subagent-row" key={agent.id}><span className={clsx('status-dot', agent.status === 'running' ? 'running' : agent.status === 'completed' ? 'idle' : 'error')}/><div><strong>{agent.agentType || 'subagent'}</strong><small>{agent.description}</small></div><code>{agent.status}</code></div>) : <p className="section-help">本会话尚无子 Agent 任务。</p>}</section>
+  </div>
+}
+
 function RuntimeConfig({ config, patch, chooseDirectory }: { config: AgentConfig; patch: (value: Partial<AgentConfig>) => void; chooseDirectory: () => void }) {
   return <div className="config-panel">
     <section><h3>工作区与模型</h3><label className="field"><span>工作目录</span><button className="path-field" onClick={chooseDirectory}><Folder size={14} /><span>{config.cwd}</span></button></label><label className="field"><span>模型 <small>留空使用 SDK 默认</small></span><input value={config.model} onChange={(event) => patch({ model: event.target.value })} placeholder="claude-sonnet-5" /></label><label className="field"><span>Fallback 模型</span><input value={config.fallbackModel} onChange={(event) => patch({ fallbackModel: event.target.value })} placeholder="可选" /></label></section>
     <section><h3>执行策略</h3><label className="field"><span>权限模式</span><select value={config.permissionMode} onChange={(event) => patch({ permissionMode: event.target.value as PermissionMode })}>{['default', 'acceptEdits', 'plan', 'dontAsk', 'auto', 'bypassPermissions'].map((value) => <option key={value}>{value}</option>)}</select></label>{config.permissionMode === 'bypassPermissions' && <div className="warning-box">此模式会跳过全部权限检查，仅用于你完全信任的工作区。</div>}<label className="field"><span>Effort</span><div className="segmented">{(['low', 'medium', 'high', 'xhigh', 'max'] as EffortLevel[]).map((level) => <button key={level} className={config.effort === level ? 'active' : ''} onClick={() => patch({ effort: level })}>{level}</button>)}</div></label><label className="field"><span>Thinking</span><select value={config.thinking.mode} onChange={(event) => patch({ thinking: { ...config.thinking, mode: event.target.value as AgentConfig['thinking']['mode'] } })}><option value="adaptive">adaptive</option><option value="enabled">fixed budget</option><option value="disabled">disabled</option></select></label>{config.thinking.mode === 'enabled' && <label className="field"><span>Thinking tokens</span><input type="number" min="1024" step="1024" value={config.thinking.budgetTokens} onChange={(event) => patch({ thinking: { ...config.thinking, budgetTokens: Number(event.target.value) } })} /></label>}</section>
-    <section><h3>边界</h3><div className="field-grid"><label className="field"><span>最大 Turns</span><input type="number" min="1" value={config.maxTurns} onChange={(event) => patch({ maxTurns: Number(event.target.value) })} /></label><label className="field"><span>预算（USD）</span><input type="number" min="0" step="0.5" value={config.maxBudgetUsd} onChange={(event) => patch({ maxBudgetUsd: Number(event.target.value) })} /></label></div><Toggle label="Sandbox" hint="隔离 Bash 与文件访问" checked={config.sandboxEnabled} onChange={(value) => patch({ sandboxEnabled: value })} /><Toggle label="文件 Checkpoint" hint="支持 SDK rewindFiles" checked={config.enableFileCheckpointing} onChange={(value) => patch({ enableFileCheckpointing: value })} /></section>
+    <section><h3>边界</h3><div className="field-grid"><label className="field"><span>最大 Turns</span><input type="number" min="1" value={config.maxTurns} onChange={(event) => patch({ maxTurns: Number(event.target.value) })} /></label><label className="field"><span>预算（USD）</span><input type="number" min="0" step="0.5" value={config.maxBudgetUsd} onChange={(event) => patch({ maxBudgetUsd: Number(event.target.value) })} /></label></div><label className="field"><span>Sandbox 配置</span><select value={config.sandboxProfile} onChange={(event) => patch({ sandboxProfile: event.target.value as SandboxProfile, sandboxEnabled: event.target.value !== 'full-access' })}><option value="read-only">只读</option><option value="workspace-write">工作区可写</option><option value="full-access">完全访问</option></select></label>{config.sandboxProfile === 'full-access' && <div className="warning-box">完全访问会关闭 SDK Sandbox，敏感工具仍受权限审批约束。</div>}<label className="field"><span>允许联网域名 <small>每行一个</small></span><textarea className="mono-input" rows={3} value={config.networkAllowedDomains.join('\n')} onChange={(event) => patch({ networkAllowedDomains: event.target.value.split('\n').map((item) => item.trim()).filter(Boolean) })} /></label><Toggle label="文件 Checkpoint" hint="支持 SDK rewindFiles" checked={config.enableFileCheckpointing} onChange={(value) => patch({ enableFileCheckpointing: value })} /></section>
     <section><h3>可观察性</h3><Toggle label="流式消息" checked={config.includePartialMessages} onChange={(value) => patch({ includePartialMessages: value })} /><Toggle label="Hook 事件" checked={config.includeHookEvents} onChange={(value) => patch({ includeHookEvents: value })} /><Toggle label="转发 Subagent 文本" checked={config.forwardSubagentText} onChange={(value) => patch({ forwardSubagentText: value })} /><Toggle label="下一步提示建议" checked={config.promptSuggestions} onChange={(value) => patch({ promptSuggestions: value })} /></section>
   </div>
 }
@@ -412,6 +495,6 @@ function PromptConfig({ config, patch }: { config: AgentConfig; patch: (value: P
 }
 
 function SdkPanel({ diagnostics, session, eventCount, onOpenLlmSettings }: { diagnostics?: AppDiagnostics; session: LabSession; eventCount: number; onOpenLlmSettings: () => void }) {
-  const rows = [['Agent SDK', diagnostics?.sdkVersion], ['Claude Code Session', session.sdkSessionId || '尚未初始化'], ['Electron', diagnostics?.electronVersion], ['Node.js', diagnostics?.nodeVersion], ['平台', `${diagnostics?.platform} / ${diagnostics?.arch}`], ['本次事件', String(eventCount)]]
+  const rows = [['AgentLab', diagnostics?.productVersion], ['Agent SDK', diagnostics?.sdkVersion], ['AgentLab Session', session.id], ['Claude Code Session UUID', session.sdkSessionId || '尚未初始化'], ['SQLite', diagnostics?.databasePath], ['Electron', diagnostics?.electronVersion], ['Node.js', diagnostics?.nodeVersion], ['平台', `${diagnostics?.platform} / ${diagnostics?.arch}`], ['本次事件', String(eventCount)]]
   return <div className="inspector-scroll sdk-panel"><div className="sdk-hero"><div className="brand-orbit"><BrainCircuit size={19} /></div><span className="eyebrow">RUNTIME DIAGNOSTICS</span><h3>真实 SDK，完整事件流</h3><p>AgentLab 在 Electron Main Process 中调用 Claude Agent SDK，Renderer 只通过受限 IPC 观察状态与处理授权。</p></div><div className="diagnostic-list">{rows.map(([label, value]) => <div key={label}><span>{label}</span><code title={value}>{value}</code></div>)}</div><div className="architecture-card"><strong>安全边界</strong><div><span>Renderer</span><i>IPC</i><span>Main</span><i>SDK</i><span>Claude</span></div><p>API Key 不进入前端；文件与命令工具由 SDK 子进程执行；敏感动作通过 canUseTool 回传授权。</p></div><button className="button primary full" onClick={onOpenLlmSettings}><KeyRound size={14} />配置 LLM API</button><button className="button secondary full sdk-secondary-button" onClick={() => diagnostics && window.agentLab.revealPath(diagnostics.userDataPath)}><Folder size={14} />打开 AgentLab 数据目录</button></div>
 }

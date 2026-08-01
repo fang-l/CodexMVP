@@ -18,12 +18,17 @@ import type {
   PermissionRequest,
   RunSummary,
   RuntimeEvent,
+  SubagentRun,
 } from '../../src/shared/types'
 import type { SessionStore } from './session-store'
 import { createSafeRunContext } from './safe-run-context'
+import { decideSubagentTool, isTerminalSubagentStatus } from './subagent-policy'
 
 interface PermissionWaiter {
+  id: string
   sessionId: string
+  turnId?: string
+  agentId?: string
   toolName: string
   toolUseId: string
   resolve: (result: PermissionResult) => void
@@ -34,6 +39,11 @@ interface PermissionWaiter {
 interface ActiveRun {
   abortController: AbortController
   query?: Query
+  turnId: string
+  pendingResult?: RunSummary
+  subagents: Map<string, SubagentRun>
+  agentTypes: Map<string, string>
+  liveBackgroundTaskIds: Set<string>
 }
 
 type EventSink = (event: RuntimeEvent) => void
@@ -53,6 +63,12 @@ const parseJson = <T>(source: string, label: string, fallback: T): T => {
 
 const MARKDOWN_OUTPUT_INSTRUCTION =
   'When the user asks you to return or render Markdown, output the Markdown directly. Do not wrap the entire response in a fenced code block unless the user explicitly asks to see Markdown source code.'
+
+const subagentStatus = (value: unknown): SubagentRun['status'] => {
+  if (value === 'completed' || value === 'failed' || value === 'stopped' || value === 'killed') return value
+  if (value === 'pending') return 'pending'
+  return 'running'
+}
 
 export class AgentRuntime {
   private readonly runs = new Map<string, ActiveRun>()
@@ -83,7 +99,13 @@ export class AgentRuntime {
     this.event(sessionId, 'status', 'Agent 正在运行', 'running')
 
     const abortController = new AbortController()
-    const run: ActiveRun = { abortController }
+    const run: ActiveRun = {
+      abortController,
+      turnId: this.store.beginTurn(sessionId, prompt),
+      subagents: new Map(),
+      agentTypes: new Map(),
+      liveBackgroundTaskIds: new Set(),
+    }
     this.runs.set(sessionId, run)
 
     try {
@@ -95,7 +117,7 @@ export class AgentRuntime {
         // A stopped run may take time to unwind inside the SDK.  Do not let its
         // late events or cleanup interfere with a newer prompt in this session.
         if (this.runs.get(sessionId) !== run) break
-        await this.handleMessage(sessionId, message)
+        await this.handleMessage(sessionId, message, run)
       }
       await this.finishRun(sessionId, run)
     } catch (error) {
@@ -114,6 +136,7 @@ export class AgentRuntime {
         this.runs.delete(sessionId)
         this.resolvePendingPermissions(sessionId, 'Agent run ended before a decision was made.')
         await this.store.update(sessionId, { status: 'error' })
+        this.store.finishTurn(run.turnId, 'failed', 'runtime_error')
         this.event(sessionId, 'error', '运行失败', text, { error: text })
       }
     }
@@ -134,6 +157,11 @@ export class AgentRuntime {
     const pending = this.pendingPermissions.get(requestId)
     if (!pending) throw new Error('这个权限请求已经失效。')
     this.pendingPermissions.delete(requestId)
+    this.store.savePermission({
+      id: pending.id, sessionId: pending.sessionId, turnId: pending.turnId, agentId: pending.agentId,
+      toolName: pending.toolName, toolUseId: pending.toolUseId, input: pending.input,
+      decision, decidedAt: Date.now(),
+    })
 
     const decisionLabel = decision === 'deny' ? '已拒绝' : decision === 'allow_session' ? '本会话允许' : '允许一次'
     this.event(pending.sessionId, 'permission', `权限决定：${pending.toolName}`, decisionLabel, {
@@ -170,13 +198,11 @@ export class AgentRuntime {
     )
     // Never let a locally installed Claude Code profile silently replace the
     // endpoint, credentials, or model configured in AgentLab.
-    const {
-      ANTHROPIC_API_KEY: _inheritedApiKey,
-      ANTHROPIC_AUTH_TOKEN: _inheritedAuthToken,
-      ANTHROPIC_BASE_URL: _inheritedBaseUrl,
-      ANTHROPIC_MODEL: _inheritedModel,
-      ...parentEnvironment
-    } = process.env
+    const parentEnvironment = { ...process.env }
+    delete parentEnvironment.ANTHROPIC_API_KEY
+    delete parentEnvironment.ANTHROPIC_AUTH_TOKEN
+    delete parentEnvironment.ANTHROPIC_BASE_URL
+    delete parentEnvironment.ANTHROPIC_MODEL
     const sdkEnvironment = Object.fromEntries(
       Object.entries({ ...parentEnvironment, ...configuredEnvironment }).filter(
         (entry): entry is [string, string] => typeof entry[1] === 'string',
@@ -202,9 +228,34 @@ export class AgentRuntime {
     const hook: HookCallback = async (input, toolUseId) => {
       const payload = asRecord(input)
       const label = String(payload.hook_event_name ?? 'Hook')
+      if (label === 'SubagentStart' && typeof payload.agent_id === 'string') {
+        run.agentTypes.set(payload.agent_id, String(payload.agent_type ?? 'unknown'))
+      }
       this.event(session.id, 'hook', label, undefined, payload, { toolUseId })
+      if (label === 'PreToolUse' && payload.tool_name === 'Agent') {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            updatedInput: { ...asRecord(payload.tool_input), run_in_background: false },
+          },
+        }
+      }
       return {}
     }
+
+    const sandbox = config.sandboxProfile === 'full-access'
+      ? { enabled: false }
+      : {
+          enabled: true,
+          failIfUnavailable: true,
+          filesystem: {
+            allowRead: [config.cwd || process.cwd(), ...config.additionalDirectories],
+            allowWrite: config.sandboxProfile === 'workspace-write'
+              ? [config.cwd || process.cwd(), ...config.additionalDirectories]
+              : [],
+          },
+          network: { allowedDomains: config.networkAllowedDomains },
+        }
 
     const options: Options = {
       abortController: run.abortController,
@@ -236,9 +287,10 @@ export class AgentRuntime {
       includePartialMessages: config.includePartialMessages,
       includeHookEvents: config.includeHookEvents,
       forwardSubagentText: config.forwardSubagentText,
+      agentProgressSummaries: true,
       enableFileCheckpointing: config.enableFileCheckpointing,
       promptSuggestions: config.promptSuggestions,
-      sandbox: { enabled: config.sandboxEnabled },
+      sandbox,
       strictMcpConfig: config.strictMcpConfig,
       mcpServers,
       agents,
@@ -248,7 +300,7 @@ export class AgentRuntime {
       persistSession: true,
       env: {
         ...sdkEnvironment,
-        CLAUDE_AGENT_SDK_CLIENT_APP: 'agent-lab-desktop/0.1.0',
+        CLAUDE_AGENT_SDK_CLIENT_APP: 'agent-lab-desktop/0.3.0',
       },
       hooks: {
         PreToolUse: [{ hooks: [hook] }],
@@ -264,15 +316,34 @@ export class AgentRuntime {
         if (run.abortController.signal.aborted || this.runs.get(session.id) !== run) {
           return { behavior: 'deny', message: 'Agent run was stopped.' }
         }
+        if (details.agentID) {
+          const agentType = run.agentTypes.get(details.agentID)
+          const decision = decideSubagentTool(details.agentID, toolName, agentType, agents)
+          if (!decision.allowed) {
+            const reason = decision.reason!
+            this.event(session.id, 'permission', `子 Agent 权限拒绝：${toolName}`, reason, { agentType }, {
+              toolName,
+              toolUseId: details.toolUseID,
+            })
+            return { behavior: 'deny', message: reason }
+          }
+        }
         const requestId = details.requestId || randomUUID()
         await this.store.update(session.id, { status: 'waiting_permission' })
         this.pendingPermissions.set(requestId, {
+          id: requestId,
           sessionId: session.id,
+          turnId: run.turnId,
+          agentId: details.agentID,
           toolName,
           toolUseId: details.toolUseID,
           resolve: () => undefined,
           suggestions: details.suggestions,
           input,
+        })
+        this.store.savePermission({
+          id: requestId, sessionId: session.id, turnId: run.turnId, agentId: details.agentID,
+          toolName, toolUseId: details.toolUseID, input,
         })
 
         const result = await new Promise<PermissionResult>((resolve, reject) => {
@@ -292,6 +363,7 @@ export class AgentRuntime {
             sessionId: session.id,
             toolName,
             toolUseId: details.toolUseID,
+            agentId: details.agentID,
             title: details.title,
             displayName: details.displayName,
             description: details.description,
@@ -322,7 +394,6 @@ export class AgentRuntime {
 
   private async finishRun(sessionId: string, run: ActiveRun, interrupted = false) {
     if (this.runs.get(sessionId) !== run) return
-    this.runs.delete(sessionId)
     this.resolvePendingPermissions(sessionId, interrupted ? 'Permission request aborted by user.' : 'Agent run ended before a decision was made.')
     if (interrupted) {
       await this.store.addMessage(sessionId, {
@@ -332,6 +403,19 @@ export class AgentRuntime {
         createdAt: Date.now(),
       })
     }
+    const unfinished = [...run.subagents.values()].filter((item) => item.status === 'pending' || item.status === 'running')
+    for (const item of unfinished) {
+      const incomplete = { ...item, status: 'incomplete' as const, completedAt: Date.now(), error: 'Parent turn ended before terminal task notification.' }
+      run.subagents.set(item.taskId, incomplete)
+      this.store.upsertSubagent(incomplete)
+      this.event(sessionId, 'subagent', `子 Agent 未完整结束：${item.description}`, incomplete.error, incomplete)
+    }
+    if (run.pendingResult) {
+      await this.store.update(sessionId, { lastResult: run.pendingResult })
+      this.event(sessionId, 'result', run.pendingResult.isError ? '运行结束（有错误）' : '运行完成', undefined, run.pendingResult)
+    }
+    this.store.finishTurn(run.turnId, interrupted ? 'interrupted' : run.pendingResult?.isError || unfinished.length ? 'failed' : 'completed', unfinished.length ? 'subagent_incomplete' : undefined)
+    this.runs.delete(sessionId)
     await this.store.update(sessionId, { status: 'idle' })
     this.event(sessionId, 'status', interrupted ? '任务已停止' : 'Agent 已空闲', 'idle')
   }
@@ -344,7 +428,7 @@ export class AgentRuntime {
     }
   }
 
-  private async handleMessage(sessionId: string, message: SDKMessage) {
+  private async handleMessage(sessionId: string, message: SDKMessage, run: ActiveRun) {
     const record = message as unknown as Record<string, unknown>
     const sdkSessionId = typeof record.session_id === 'string' ? record.session_id : undefined
     if (sdkSessionId) {
@@ -430,13 +514,16 @@ export class AgentRuntime {
         usage: message.usage as unknown as Record<string, unknown>,
         permissionDenials: message.permission_denials,
       }
-      await this.store.update(sessionId, { lastResult: summary })
-      this.event(sessionId, 'result', message.subtype === 'success' ? '运行完成' : '运行结束（有错误）', undefined, summary)
+      run.pendingResult = summary
       return
     }
 
     if (message.type === 'system') {
       const subtype = String(record.subtype ?? 'system')
+      if (['task_started', 'task_progress', 'task_updated', 'task_notification', 'background_tasks_changed'].includes(subtype)) {
+        this.handleSubagentEvent(sessionId, subtype, record, run)
+        return
+      }
       if (subtype === 'prompt_suggestion' && typeof record.suggestion === 'string') {
         this.event(sessionId, 'prompt_suggestion', '下一步建议', record.suggestion, record)
       } else {
@@ -456,6 +543,54 @@ export class AgentRuntime {
     data?: unknown,
     extra: Partial<RuntimeEvent> = {},
   ) {
-    this.emit({ id: randomUUID(), sessionId, timestamp: Date.now(), kind, label, text, data, ...extra })
+    const run = this.runs.get(sessionId)
+    const event = { id: randomUUID(), sessionId, turnId: run?.turnId, timestamp: Date.now(), kind, label, text, data, ...extra }
+    this.store.addEvent(event)
+    this.emit(event)
+  }
+
+  private handleSubagentEvent(sessionId: string, subtype: string, record: Record<string, unknown>, run: ActiveRun) {
+    if (subtype === 'background_tasks_changed') {
+      const tasks = Array.isArray(record.tasks) ? record.tasks.map(asRecord) : []
+      run.liveBackgroundTaskIds = new Set(tasks.map((task) => String(task.task_id ?? '')).filter(Boolean))
+      this.event(sessionId, 'subagent', '后台任务集合已更新', `${run.liveBackgroundTaskIds.size} 个活动任务`, {
+        taskIds: [...run.liveBackgroundTaskIds],
+        replaceSemantics: true,
+      })
+      return
+    }
+
+    const taskId = String(record.task_id ?? '')
+    if (!taskId) return
+    const previous = run.subagents.get(taskId)
+    const now = Date.now()
+    const patch = asRecord(record.patch)
+    const usage = asRecord(record.usage)
+    const status = subtype === 'task_notification'
+      ? subagentStatus(record.status)
+      : subtype === 'task_updated'
+        ? subagentStatus(patch.status ?? previous?.status)
+        : previous?.status ?? 'running'
+    const current: SubagentRun = {
+      id: previous?.id ?? taskId,
+      sessionId,
+      turnId: run.turnId,
+      taskId,
+      agentId: previous?.agentId,
+      agentType: typeof record.subagent_type === 'string' ? record.subagent_type : previous?.agentType,
+      description: String(record.description ?? patch.description ?? previous?.description ?? '子 Agent 任务'),
+      status,
+      summary: typeof record.summary === 'string' ? record.summary : previous?.summary,
+      lastToolName: typeof record.last_tool_name === 'string' ? record.last_tool_name : previous?.lastToolName,
+      totalTokens: typeof usage.total_tokens === 'number' ? usage.total_tokens : previous?.totalTokens,
+      toolUses: typeof usage.tool_uses === 'number' ? usage.tool_uses : previous?.toolUses,
+      durationMs: typeof usage.duration_ms === 'number' ? usage.duration_ms : previous?.durationMs,
+      error: typeof patch.error === 'string' ? patch.error : status === 'failed' ? String(record.summary ?? 'Subagent failed') : previous?.error,
+      startedAt: previous?.startedAt ?? now,
+      completedAt: isTerminalSubagentStatus(status) ? now : undefined,
+    }
+    run.subagents.set(taskId, current)
+    this.store.upsertSubagent(current)
+    this.event(sessionId, 'subagent', `${current.agentType ?? '子 Agent'}：${current.description}`, current.status, current)
   }
 }

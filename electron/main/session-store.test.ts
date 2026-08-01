@@ -35,4 +35,19 @@ describe('SessionStore', () => {
     assert.equal(snapshot.sessions[0].title, 'Inspect this repository')
     assert.equal(snapshot.sessions[0].messages[0].content, 'Inspect this repository')
   })
+
+  it('persists turn events and marks unfinished work interrupted after restart', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'agentlab-turn-test-'))
+    temporaryDirectories.push(directory)
+    const store = new SessionStore(directory, '/workspace')
+    await store.load()
+    const session = await store.create()
+    const turnId = store.beginTurn(session.id, 'run three reviewers')
+    store.addEvent({ id: 'event-1', sessionId: session.id, turnId, timestamp: 100, kind: 'subagent', label: 'reviewer started' })
+
+    const restored = new SessionStore(directory, '/workspace')
+    await restored.load()
+    assert.equal(restored.listEvents(session.id)[0].turnId, turnId)
+    assert.equal(restored.get(session.id).status, 'idle')
+  })
 })

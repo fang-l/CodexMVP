@@ -21,6 +21,7 @@ export function createBrowserPreviewApi(): AgentLabApi {
     diagnostics: {
       platform: 'darwin', arch: 'arm64', nodeVersion: '22.x', electronVersion: '35.x',
       sdkVersion: '0.3.216', apiKeyConfigured: false, userDataPath: '/preview/AgentLab',
+      databasePath: '/preview/AgentLab/agentlab-v3.sqlite', productVersion: '0.3.0',
     },
     llmConfig,
   })
@@ -50,6 +51,20 @@ export function createBrowserPreviewApi(): AgentLabApi {
       llmConfig = { provider: 'anthropic', baseUrl: '', model: '', authMode: 'api_key', apiKeyConfigured: false, maskedApiKey: '', source: 'none', encryptionAvailable: true }
       return structuredClone(llmConfig)
     },
+    getGitStatus: async () => ({ available: false, ahead: 0, behind: 0, files: [], error: '浏览器预览不连接本地 Git。' }),
+    getGitDiff: async (_sessionId, scope) => ({ scope, patch: '', stateToken: 'preview' }),
+    stageGitFile: async () => ({ available: false, ahead: 0, behind: 0, files: [] }),
+    unstageGitFile: async () => ({ available: false, ahead: 0, behind: 0, files: [] }),
+    applyGitPatch: async () => ({ available: false, ahead: 0, behind: 0, files: [] }),
+    revertGitFile: async () => ({ available: false, ahead: 0, behind: 0, files: [] }),
+    commitGit: async () => { throw new Error('浏览器预览不支持 Git commit。') },
+    listFiles: async () => [],
+    readFilePreview: async () => '',
+    discoverVerifications: async () => [],
+    runVerification: async () => { throw new Error('浏览器预览不支持验证命令。') },
+    listVerifications: async () => [],
+    listPersistedEvents: async () => [],
+    listSubagents: async () => [],
     onEvent: (listener) => { eventListeners.add(listener); return () => eventListeners.delete(listener) },
     onPermission: (listener) => { permissionListeners.add(listener); return () => permissionListeners.delete(listener) },
   }

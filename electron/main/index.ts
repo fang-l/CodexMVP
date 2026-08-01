@@ -8,6 +8,9 @@ import type { AgentConfig, AppDiagnostics, LabSession, LlmApiConfigInput, Permis
 import { AgentRuntime } from './agent-runtime'
 import { SessionStore } from './session-store'
 import { CredentialStore } from './credential-store'
+import { GitService } from './git-service'
+import { FileService } from './file-service'
+import { VerificationService } from './verification-service'
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
@@ -18,6 +21,9 @@ let mainWindow: BrowserWindow | null = null
 let store: SessionStore
 let runtime: AgentRuntime
 let credentials: CredentialStore
+const git = new GitService()
+const files = new FileService()
+let verifications: VerificationService
 
 export const resolvePackagedClaudeExecutable = () => {
   if (!app.isPackaged) return undefined
@@ -74,6 +80,8 @@ const registerIpc = () => {
       sdkVersion,
       apiKeyConfigured: credentials.publicConfig().apiKeyConfigured,
       userDataPath: app.getPath('userData'),
+      databasePath: store.databasePath,
+      productVersion: app.getVersion(),
     }
     return { ...persisted, diagnostics, llmConfig: credentials.publicConfig() }
   })
@@ -103,6 +111,21 @@ const registerIpc = () => {
   ipcMain.handle('llm:get-config', () => credentials.publicConfig())
   ipcMain.handle('llm:save-config', (_event, config: LlmApiConfigInput) => credentials.save(config))
   ipcMain.handle('llm:clear-config', () => credentials.clear())
+  const cwdFor = (sessionId: string) => store.get(sessionId).config.cwd
+  ipcMain.handle('git:status', (_event, sessionId: string) => git.status(cwdFor(sessionId)))
+  ipcMain.handle('git:diff', (_event, sessionId: string, scope: 'unstaged' | 'staged') => git.diff(cwdFor(sessionId), scope))
+  ipcMain.handle('git:stage-file', (_event, sessionId: string, filePath: string, token: string) => git.stageFile(cwdFor(sessionId), filePath, token))
+  ipcMain.handle('git:unstage-file', (_event, sessionId: string, filePath: string, token: string) => git.unstageFile(cwdFor(sessionId), filePath, token))
+  ipcMain.handle('git:apply-patch', (_event, sessionId: string, patch: string, operation: 'stage' | 'unstage' | 'revert', token: string) => git.applyPatch(cwdFor(sessionId), patch, operation, token))
+  ipcMain.handle('git:revert-file', (_event, sessionId: string, filePath: string, token: string, confirmed: boolean) => git.revertFile(cwdFor(sessionId), filePath, token, confirmed))
+  ipcMain.handle('git:commit', (_event, sessionId: string, message: string, token: string) => git.commit(cwdFor(sessionId), message, token))
+  ipcMain.handle('files:list', (_event, sessionId: string, relativePath?: string) => files.list(cwdFor(sessionId), relativePath))
+  ipcMain.handle('files:preview', (_event, sessionId: string, relativePath: string) => files.preview(cwdFor(sessionId), relativePath))
+  ipcMain.handle('verification:discover', (_event, sessionId: string) => verifications.discover(sessionId))
+  ipcMain.handle('verification:run', (_event, sessionId: string, commandId: string) => verifications.run(sessionId, commandId))
+  ipcMain.handle('verification:list', (_event, sessionId: string) => store.listVerifications(sessionId))
+  ipcMain.handle('events:list', (_event, sessionId: string, limit?: number, before?: number) => store.listEvents(sessionId, limit, before))
+  ipcMain.handle('subagents:list', (_event, sessionId: string) => store.listSubagents(sessionId))
 }
 
 app.whenReady().then(async () => {
@@ -110,6 +133,7 @@ app.whenReady().then(async () => {
   credentials = new CredentialStore(app.getPath('userData'), safeStorage)
   await credentials.load()
   await store.load()
+  verifications = new VerificationService(store)
   if (store.snapshot().sessions.length === 0) await store.create()
   runtime = new AgentRuntime(
     store,

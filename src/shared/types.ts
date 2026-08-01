@@ -10,6 +10,7 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type SettingSource = 'user' | 'project' | 'local'
 export type LlmProvider = 'anthropic' | 'compatible' | 'environment'
 export type LlmAuthMode = 'api_key' | 'bearer'
+export type SandboxProfile = 'read-only' | 'workspace-write' | 'full-access'
 
 export interface LlmApiConfigInput {
   provider: LlmProvider
@@ -58,6 +59,8 @@ export interface AgentConfig {
   enableFileCheckpointing: boolean
   promptSuggestions: boolean
   sandboxEnabled: boolean
+  sandboxProfile: SandboxProfile
+  networkAllowedDomains: string[]
   strictMcpConfig: boolean
   mcpServersJson: string
   agentsJson: string
@@ -93,6 +96,7 @@ export type RuntimeEventKind =
   | 'tool_use'
   | 'tool_result'
   | 'permission'
+  | 'subagent'
   | 'hook'
   | 'status'
   | 'system'
@@ -103,6 +107,7 @@ export type RuntimeEventKind =
 export interface RuntimeEvent {
   id: string
   sessionId: string
+  turnId?: string
   sdkSessionId?: string
   timestamp: number
   kind: RuntimeEventKind
@@ -132,6 +137,7 @@ export interface PermissionRequest {
   sessionId: string
   toolName: string
   toolUseId: string
+  agentId?: string
   title?: string
   displayName?: string
   description?: string
@@ -151,6 +157,88 @@ export interface AppDiagnostics {
   sdkVersion: string
   apiKeyConfigured: boolean
   userDataPath: string
+  databasePath: string
+  productVersion: string
+}
+
+export interface SubagentRun {
+  id: string
+  sessionId: string
+  turnId?: string
+  taskId: string
+  agentId?: string
+  agentType?: string
+  description: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'stopped' | 'killed' | 'incomplete'
+  summary?: string
+  lastToolName?: string
+  totalTokens?: number
+  toolUses?: number
+  durationMs?: number
+  error?: string
+  startedAt: number
+  completedAt?: number
+}
+
+export interface GitFileChange {
+  path: string
+  originalPath?: string
+  indexStatus: string
+  worktreeStatus: string
+  untracked: boolean
+}
+
+export interface GitWorkspaceStatus {
+  available: boolean
+  repoRoot?: string
+  branch?: string
+  headOid?: string
+  upstream?: string
+  ahead: number
+  behind: number
+  stateToken?: string
+  files: GitFileChange[]
+  error?: string
+}
+
+export interface GitDiffView {
+  scope: 'unstaged' | 'staged'
+  patch: string
+  stateToken: string
+}
+
+export interface GitCommitResult {
+  oid: string
+  message: string
+  status: GitWorkspaceStatus
+}
+
+export interface VerificationCommand {
+  id: string
+  label: string
+  executable: string
+  args: string[]
+  cwd: string
+  source: 'discovered' | 'custom'
+}
+
+export interface VerificationRun {
+  id: string
+  sessionId: string
+  command: VerificationCommand
+  status: 'running' | 'passed' | 'failed' | 'interrupted'
+  exitCode?: number
+  durationMs?: number
+  output: string
+  startedAt: number
+  completedAt?: number
+}
+
+export interface FileTreeEntry {
+  name: string
+  path: string
+  kind: 'file' | 'directory' | 'symlink'
+  gitStatus?: string
 }
 
 export interface AppSnapshot {
@@ -173,6 +261,20 @@ export interface AgentLabApi {
   getLlmConfig(): Promise<LlmApiConfigPublic>
   saveLlmConfig(config: LlmApiConfigInput): Promise<LlmApiConfigPublic>
   clearLlmConfig(): Promise<LlmApiConfigPublic>
+  getGitStatus(sessionId: string): Promise<GitWorkspaceStatus>
+  getGitDiff(sessionId: string, scope: 'unstaged' | 'staged'): Promise<GitDiffView>
+  stageGitFile(sessionId: string, path: string, stateToken: string): Promise<GitWorkspaceStatus>
+  unstageGitFile(sessionId: string, path: string, stateToken: string): Promise<GitWorkspaceStatus>
+  applyGitPatch(sessionId: string, patch: string, operation: 'stage' | 'unstage' | 'revert', stateToken: string): Promise<GitWorkspaceStatus>
+  revertGitFile(sessionId: string, path: string, stateToken: string, confirmed: boolean): Promise<GitWorkspaceStatus>
+  commitGit(sessionId: string, message: string, stateToken: string): Promise<GitCommitResult>
+  listFiles(sessionId: string, relativePath?: string): Promise<FileTreeEntry[]>
+  readFilePreview(sessionId: string, relativePath: string): Promise<string>
+  discoverVerifications(sessionId: string): Promise<VerificationCommand[]>
+  runVerification(sessionId: string, commandId: string): Promise<VerificationRun>
+  listVerifications(sessionId: string): Promise<VerificationRun[]>
+  listPersistedEvents(sessionId: string, limit?: number, before?: number): Promise<RuntimeEvent[]>
+  listSubagents(sessionId: string): Promise<SubagentRun[]>
   onEvent(listener: (event: RuntimeEvent) => void): () => void
   onPermission(listener: (request: PermissionRequest) => void): () => void
 }
@@ -201,6 +303,8 @@ export const createDefaultConfig = (cwd = ''): AgentConfig => ({
   enableFileCheckpointing: true,
   promptSuggestions: true,
   sandboxEnabled: true,
+  sandboxProfile: 'workspace-write',
+  networkAllowedDomains: [],
   strictMcpConfig: false,
   mcpServersJson: '{}',
   agentsJson: JSON.stringify(

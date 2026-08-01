@@ -1,0 +1,9 @@
+{
+  "caseId": "TC-10",
+  "description": "Start three named read-only reviewers and wait for every terminal task notification before the parent result is finalized.",
+  "agents": ["architecture-reviewer", "security-reviewer", "test-reviewer"],
+  "requiredTools": ["Read", "Glob", "Grep"],
+  "forbiddenTools": ["Bash", "Edit", "Write", "WebFetch", "WebSearch"],
+  "terminalStatuses": ["completed", "failed", "stopped", "killed"],
+  "repeatCount": 10
+}
