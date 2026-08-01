@@ -86,10 +86,22 @@ const registerIpc = () => {
     return { ...persisted, diagnostics, llmConfig: credentials.publicConfig() }
   })
 
-  ipcMain.handle('session:create', (_event, config?: Partial<AgentConfig>) => store.create(config))
+  const projectRootFor = async (candidatePath: string) => {
+    const status = await git.status(candidatePath)
+    return status.available && status.repoRoot ? status.repoRoot : path.resolve(candidatePath)
+  }
+  ipcMain.handle('project:list', () => store.listProjects())
+  ipcMain.handle('project:create', async (_event, rootPath: string) => store.createProject(await projectRootFor(rootPath)))
+  ipcMain.handle('session:create', async (_event, config?: Partial<AgentConfig>, projectId?: string) => {
+    const normalized = config?.cwd ? { ...config, cwd: await projectRootFor(config.cwd) } : config
+    return store.create(normalized, projectId)
+  })
   ipcMain.handle(
     'session:update',
-    (_event, sessionId: string, patch: Partial<Pick<LabSession, 'title' | 'config'>>) => store.update(sessionId, patch),
+    async (_event, sessionId: string, patch: Partial<Pick<LabSession, 'title' | 'config'>>) => {
+      const normalized = patch.config?.cwd ? { ...patch, config: { ...patch.config, cwd: await projectRootFor(patch.config.cwd) } } : patch
+      return store.update(sessionId, normalized)
+    },
   )
   ipcMain.handle('session:delete', async (_event, sessionId: string) => {
     await runtime.interrupt(sessionId)

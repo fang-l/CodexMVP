@@ -17,6 +17,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Play,
+  Plus,
   Send,
   Settings2,
   ShieldCheck,
@@ -40,6 +41,7 @@ import type {
   ChatMessage,
   EffortLevel,
   LabSession,
+  Project,
   LlmApiConfigInput,
   LlmApiConfigPublic,
   PermissionDecision,
@@ -117,6 +119,9 @@ function EmptyState({ onPrompt }: { onPrompt: (prompt: string) => void }) {
 
 export function App() {
   const [sessions, setSessions] = useState<LabSession[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  const [activeProjectId, setActiveProjectId] = useState<string>()
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   const [activeSessionId, setActiveSessionId] = useState<string>()
   const [diagnostics, setDiagnostics] = useState<AppDiagnostics>()
   const [events, setEvents] = useState<Record<string, RuntimeEvent[]>>({})
@@ -172,6 +177,9 @@ export function App() {
     void window.agentLab.load().then((snapshot) => {
       if (disposed) return
       setSessions(snapshot.sessions)
+      setProjects(snapshot.projects)
+      setActiveProjectId(snapshot.activeProjectId ?? snapshot.sessions[0]?.projectId)
+      setExpandedProjects(new Set(snapshot.projects.map((project) => project.id)))
       setActiveSessionId(snapshot.activeSessionId ?? snapshot.sessions[0]?.id)
       setDiagnostics(snapshot.diagnostics)
       setLlmConfig(snapshot.llmConfig)
@@ -226,8 +234,9 @@ export function App() {
   }, [activeSession?.messages.length, activeStream, activeEvents.length])
 
   const createSession = async () => {
-    const session = await window.agentLab.createSession(activeSession ? { cwd: activeSession.config.cwd } : undefined)
+    const session = await window.agentLab.createSession(activeSession ? { cwd: activeSession.config.cwd } : undefined, activeProjectId ?? activeSession?.projectId)
     setSessions((current) => [session, ...current])
+    setActiveProjectId(session.projectId)
     setActiveSessionId(session.id)
     setPrompt('')
   }
@@ -248,7 +257,24 @@ export function App() {
 
   const chooseDirectory = async () => {
     const directory = await window.agentLab.chooseDirectory()
-    if (directory) patchConfig({ cwd: directory })
+    if (!directory || !activeSession) return
+    const updated = await window.agentLab.updateSession(activeSession.id, { config: { ...activeSession.config, cwd: directory } })
+    setSessions((current) => current.map((session) => session.id === updated.id ? updated : session))
+    setProjects(await window.agentLab.listProjects())
+    setActiveProjectId(updated.projectId)
+    if (updated.projectId) setExpandedProjects((current) => new Set([...current, updated.projectId!]))
+  }
+
+  const openProject = async () => {
+    const directory = await window.agentLab.chooseDirectory()
+    if (!directory) return
+    const project = await window.agentLab.createProject(directory)
+    const session = await window.agentLab.createSession({ cwd: project.rootPath }, project.id)
+    setProjects(await window.agentLab.listProjects())
+    setSessions((current) => [session, ...current])
+    setActiveProjectId(project.id)
+    setExpandedProjects((current) => new Set([...current, project.id]))
+    setActiveSessionId(session.id)
   }
 
   const send = async (override?: string) => {
@@ -325,16 +351,25 @@ export function App() {
           <div><strong>AgentLab</strong><small>SDK Workbench</small></div>
           <button className="icon-button sidebar-close" onClick={() => setSidebarOpen(false)}><X size={17} /></button>
         </div>
-        <button className="new-session" onClick={createSession}><MessageSquarePlus size={16} /> 新建实验 <kbd>⌘N</kbd></button>
-        <div className="sidebar-section-label">最近会话 <span>{sessions.length}</span></div>
-        <nav className="session-list">
-          {sessions.map((session) => (
-            <button key={session.id} className={clsx('session-card', session.id === activeSessionId && 'active')} onClick={() => setActiveSessionId(session.id)}>
-              <span className={clsx('status-dot', session.status)} />
-              <span className="session-copy"><strong>{session.title}</strong><small>{new Date(session.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</small></span>
-              <span className="delete-session" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); void deleteSession(session.id) }}><Trash2 size={14} /></span>
-            </button>
-          ))}
+        <div className="sidebar-actions"><button className="new-session" onClick={createSession}><MessageSquarePlus size={16} /> 新建实验 <kbd>⌘N</kbd></button><button className="open-project" onClick={() => void openProject()}><Plus size={15} /> 打开项目</button></div>
+        <div className="sidebar-section-label">项目 <span>{projects.length}</span></div>
+        <nav className="project-list" aria-label="项目与会话">
+          {projects.map((project) => {
+            const projectSessions = sessions.filter((session) => session.projectId === project.id)
+            const expanded = expandedProjects.has(project.id)
+            return <section className={clsx('project-group', project.id === activeProjectId && 'active')} key={project.id}>
+              <button className="project-card" onClick={() => { setActiveProjectId(project.id); setExpandedProjects((current) => { const next = new Set(current); if (next.has(project.id)) next.delete(project.id); else next.add(project.id); return next }) }} title={project.rootPath} aria-expanded={expanded}>
+                <ChevronDown className={clsx(!expanded && 'collapsed')} size={14} /><Folder size={15}/><span><strong>{project.name}</strong><small>{projectSessions.length} 个会话 · {project.rootPath}</small></span>
+              </button>
+              {expanded && <div className="session-list">{projectSessions.length ? projectSessions.map((session) => (
+                <button key={session.id} className={clsx('session-card', session.id === activeSessionId && 'active')} onClick={() => { setActiveSessionId(session.id); setActiveProjectId(project.id) }}>
+                  <span className={clsx('status-dot', session.status)} />
+                  <span className="session-copy"><strong>{session.title}</strong><small>{new Date(session.updatedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</small></span>
+                  <span className="delete-session" role="button" tabIndex={0} onClick={(event) => { event.stopPropagation(); void deleteSession(session.id) }}><Trash2 size={14} /></span>
+                </button>
+              )) : <p className="project-empty">此项目尚无会话</p>}</div>}
+            </section>
+          })}
         </nav>
         <div className="sidebar-footer">
           <button className={clsx('auth-state', diagnostics?.apiKeyConfigured && 'ready')} onClick={() => setLlmSettingsOpen(true)}><Circle size={9} fill="currentColor" /><span>{diagnostics?.apiKeyConfigured ? `API 已配置 · ${llmConfig?.source === 'environment' ? '环境' : '加密存储'}` : '配置 LLM API'}</span></button>

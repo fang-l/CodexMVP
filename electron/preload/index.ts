@@ -3,7 +3,9 @@ import type { AgentLabApi, PermissionRequest, RuntimeEvent } from '../../src/sha
 
 const api: AgentLabApi = {
   load: () => ipcRenderer.invoke('app:load'),
-  createSession: (config) => ipcRenderer.invoke('session:create', config),
+  listProjects: () => ipcRenderer.invoke('project:list'),
+  createProject: (rootPath) => ipcRenderer.invoke('project:create', rootPath),
+  createSession: (config, projectId) => ipcRenderer.invoke('session:create', config, projectId),
   updateSession: (sessionId, patch) => ipcRenderer.invoke('session:update', sessionId, patch),
   deleteSession: (sessionId) => ipcRenderer.invoke('session:delete', sessionId),
   sendMessage: (sessionId, prompt) => ipcRenderer.invoke('agent:send', sessionId, prompt),

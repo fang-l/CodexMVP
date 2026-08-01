@@ -78,6 +78,7 @@ export interface ChatMessage {
 
 export interface LabSession {
   id: string
+  projectId?: string
   sdkSessionId?: string
   title: string
   createdAt: number
@@ -86,6 +87,14 @@ export interface LabSession {
   config: AgentConfig
   messages: ChatMessage[]
   lastResult?: RunSummary
+}
+
+export interface Project {
+  id: string
+  name: string
+  rootPath: string
+  createdAt: number
+  updatedAt: number
 }
 
 export type RuntimeEventKind =
@@ -242,7 +251,9 @@ export interface FileTreeEntry {
 }
 
 export interface AppSnapshot {
+  projects: Project[]
   sessions: LabSession[]
+  activeProjectId?: string
   activeSessionId?: string
   diagnostics: AppDiagnostics
   llmConfig: LlmApiConfigPublic
@@ -250,7 +261,9 @@ export interface AppSnapshot {
 
 export interface AgentLabApi {
   load(): Promise<AppSnapshot>
-  createSession(config?: Partial<AgentConfig>): Promise<LabSession>
+  listProjects(): Promise<Project[]>
+  createProject(rootPath: string): Promise<Project>
+  createSession(config?: Partial<AgentConfig>, projectId?: string): Promise<LabSession>
   updateSession(sessionId: string, patch: Partial<Pick<LabSession, 'title' | 'config'>>): Promise<LabSession>
   deleteSession(sessionId: string): Promise<void>
   sendMessage(sessionId: string, prompt: string): Promise<void>

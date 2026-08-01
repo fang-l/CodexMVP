@@ -6,6 +6,7 @@ import type {
   AgentConfig,
   ChatMessage,
   LabSession,
+  Project,
   RuntimeEvent,
   SubagentRun,
   VerificationRun,
@@ -21,7 +22,7 @@ interface LegacyPersistedState {
 type SessionPatch = Partial<Pick<LabSession, 'title' | 'config' | 'status' | 'sdkSessionId' | 'lastResult'>>
 
 export class SessionStore {
-  private state: { activeSessionId?: string; sessions: LabSession[] } = { sessions: [] }
+  private state: { activeProjectId?: string; activeSessionId?: string; projects: Project[]; sessions: LabSession[] } = { projects: [], sessions: [] }
   private readonly legacyStateFile: string
   readonly databasePath: string
   private database?: DatabaseSync
@@ -52,18 +53,24 @@ export class SessionStore {
     return session
   }
 
-  async create(config?: Partial<AgentConfig>) {
+  async create(config?: Partial<AgentConfig>, requestedProjectId?: string) {
     const now = Date.now()
+    const resolvedConfig = { ...createDefaultConfig(this.defaultCwd), ...config }
+    const project = requestedProjectId
+      ? this.getProject(requestedProjectId)
+      : this.ensureProject(resolvedConfig.cwd)
     const session: LabSession = {
       id: randomUUID(),
+      projectId: project.id,
       title: '新实验',
       createdAt: now,
       updatedAt: now,
       status: 'idle',
-      config: { ...createDefaultConfig(this.defaultCwd), ...config },
+      config: { ...resolvedConfig, cwd: project.rootPath },
       messages: [],
     }
     this.state.sessions.unshift(session)
+    this.state.activeProjectId = project.id
     this.state.activeSessionId = session.id
     this.persistSession(session)
     this.persistAppState()
@@ -73,12 +80,21 @@ export class SessionStore {
   async update(sessionId: string, patch: SessionPatch) {
     const session = this.get(sessionId)
     if (patch.title !== undefined) session.title = patch.title
-    if (patch.config !== undefined) session.config = { ...session.config, ...patch.config }
+    if (patch.config !== undefined) {
+      session.config = { ...session.config, ...patch.config }
+      if (patch.config.cwd !== undefined) {
+        const project = this.ensureProject(patch.config.cwd)
+        session.projectId = project.id
+        session.config.cwd = project.rootPath
+        this.state.activeProjectId = project.id
+      }
+    }
     if (patch.status !== undefined) session.status = patch.status
     if (patch.sdkSessionId !== undefined) session.sdkSessionId = patch.sdkSessionId
     if (patch.lastResult !== undefined) session.lastResult = patch.lastResult
     session.updatedAt = Date.now()
     this.persistSession(session)
+    this.persistAppState()
     return structuredClone(session)
   }
 
@@ -101,6 +117,16 @@ export class SessionStore {
     if (this.state.activeSessionId === sessionId) this.state.activeSessionId = this.state.sessions[0]?.id
     this.db().prepare('DELETE FROM sessions WHERE id = ?').run(sessionId)
     this.persistAppState()
+  }
+
+  listProjects() { return structuredClone(this.state.projects) }
+
+  async createProject(rootPath: string) { return structuredClone(this.ensureProject(rootPath)) }
+
+  private getProject(projectId: string) {
+    const project = this.state.projects.find((item) => item.id === projectId)
+    if (!project) throw new Error(`Unknown AgentLab project: ${projectId}`)
+    return project
   }
 
   beginTurn(sessionId: string, prompt: string) {
@@ -251,7 +277,11 @@ export class SessionStore {
       CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        status TEXT NOT NULL, config_json TEXT NOT NULL, sdk_session_id TEXT, last_result_json TEXT
+        project_id TEXT, status TEXT NOT NULL, config_json TEXT NOT NULL, sdk_session_id TEXT, last_result_json TEXT
+      );
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -288,6 +318,8 @@ export class SessionStore {
       );
       CREATE INDEX IF NOT EXISTS idx_subagents_session ON subagent_runs(session_id, started_at);
     `)
+    const columns = this.db().prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>
+    if (!columns.some((column) => column.name === 'project_id')) this.db().exec('ALTER TABLE sessions ADD COLUMN project_id TEXT')
   }
 
   private async importLegacyStateIfNeeded() {
@@ -327,15 +359,22 @@ export class SessionStore {
   }
 
   private loadStateFromDatabase() {
+    const projectRows = this.db().prepare('SELECT * FROM projects ORDER BY updated_at DESC').all() as Array<Record<string, unknown>>
+    this.state.projects = projectRows.map((row) => ({
+      id: String(row.id), name: String(row.name), rootPath: String(row.root_path),
+      createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+    }))
     const rows = this.db().prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all() as Array<Record<string, unknown>>
     this.state.sessions = rows.map((row) => {
       const storedConfig = JSON.parse(String(row.config_json)) as Partial<AgentConfig>
       const config = { ...createDefaultConfig(this.defaultCwd), ...storedConfig }
       if (!storedConfig.sandboxProfile) config.sandboxProfile = storedConfig.sandboxEnabled === false ? 'full-access' : 'workspace-write'
       const messages = this.db().prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at').all(String(row.id)) as Array<Record<string, unknown>>
+      const projectId = row.project_id ? String(row.project_id) : this.ensureProject(config.cwd).id
+      if (!row.project_id) this.db().prepare('UPDATE sessions SET project_id = ? WHERE id = ?').run(projectId, String(row.id))
       return {
         id: String(row.id), title: String(row.title), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
-        status: String(row.status) as LabSession['status'], config,
+        projectId, status: String(row.status) as LabSession['status'], config,
         sdkSessionId: row.sdk_session_id ? String(row.sdk_session_id) : undefined,
         lastResult: row.last_result_json ? JSON.parse(String(row.last_result_json)) : undefined,
         messages: messages.map((message) => ({
@@ -348,6 +387,10 @@ export class SessionStore {
     this.state.activeSessionId = active?.value && this.state.sessions.some((item) => item.id === active.value)
       ? active.value
       : this.state.sessions[0]?.id
+    const activeProject = this.db().prepare('SELECT value FROM app_state WHERE key = ?').get('activeProjectId') as { value?: string } | undefined
+    this.state.activeProjectId = activeProject?.value && this.state.projects.some((item) => item.id === activeProject.value)
+      ? activeProject.value
+      : this.state.sessions.find((item) => item.id === this.state.activeSessionId)?.projectId
   }
 
   private recoverInterruptedTurns() {
@@ -365,20 +408,43 @@ export class SessionStore {
   private persistSession(session: LabSession) {
     this.db().prepare(`
       INSERT INTO sessions
-        (id, title, created_at, updated_at, status, config_json, sdk_session_id, last_result_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, title, created_at, updated_at, project_id, status, config_json, sdk_session_id, last_result_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title, updated_at = excluded.updated_at, status = excluded.status,
+        project_id = excluded.project_id,
         config_json = excluded.config_json, sdk_session_id = excluded.sdk_session_id,
         last_result_json = excluded.last_result_json
     `).run(
-      session.id, session.title, session.createdAt, session.updatedAt, session.status,
+      session.id, session.title, session.createdAt, session.updatedAt, session.projectId ?? null, session.status,
       JSON.stringify(session.config), session.sdkSessionId ?? null, JSON.stringify(session.lastResult ?? null),
     )
   }
 
   private persistAppState() {
     this.db().prepare('INSERT OR REPLACE INTO app_state VALUES (?, ?)').run('activeSessionId', this.state.activeSessionId ?? '')
+    this.db().prepare('INSERT OR REPLACE INTO app_state VALUES (?, ?)').run('activeProjectId', this.state.activeProjectId ?? '')
+  }
+
+  private ensureProject(rootPath: string) {
+    const normalized = path.resolve(rootPath || this.defaultCwd)
+    const existing = this.state.projects.find((item) => item.rootPath === normalized)
+    if (existing) {
+      existing.updatedAt = Date.now()
+      this.persistProject(existing)
+      return existing
+    }
+    const project: Project = { id: randomUUID(), name: path.basename(normalized) || normalized, rootPath: normalized, createdAt: Date.now(), updatedAt: Date.now() }
+    this.state.projects.unshift(project)
+    this.persistProject(project)
+    return project
+  }
+
+  private persistProject(project: Project) {
+    this.db().prepare(`
+      INSERT INTO projects (id, name, root_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(root_path) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at
+    `).run(project.id, project.name, project.rootPath, project.createdAt, project.updatedAt)
   }
 
   private nextEventSequence(sessionId: string) {

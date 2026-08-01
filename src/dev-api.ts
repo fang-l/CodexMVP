@@ -1,10 +1,11 @@
-import type { AgentLabApi, AppSnapshot, LabSession, PermissionRequest, RuntimeEvent } from './shared/types'
+import type { AgentLabApi, AppSnapshot, LabSession, PermissionRequest, Project, RuntimeEvent } from './shared/types'
 import { createDefaultConfig } from './shared/types'
 
 export function createBrowserPreviewApi(): AgentLabApi {
   const now = Date.now()
   let sessions: LabSession[] = [{
     id: 'preview-session',
+    projectId: 'preview-project',
     title: 'Claude Agent SDK 实验',
     createdAt: now,
     updatedAt: now,
@@ -12,11 +13,14 @@ export function createBrowserPreviewApi(): AgentLabApi {
     config: createDefaultConfig('/Users/you/Projects/example-app'),
     messages: [],
   }]
+  let projects: Project[] = [{ id: 'preview-project', name: 'example-app', rootPath: '/Users/you/Projects/example-app', createdAt: now, updatedAt: now }]
   const eventListeners = new Set<(event: RuntimeEvent) => void>()
   const permissionListeners = new Set<(request: PermissionRequest) => void>()
   let llmConfig: AppSnapshot['llmConfig'] = { provider: 'anthropic', baseUrl: '', model: '', authMode: 'api_key', apiKeyConfigured: false, maskedApiKey: '', source: 'none', encryptionAvailable: true }
   const snapshot = (): AppSnapshot => ({
+    projects: structuredClone(projects),
     sessions: structuredClone(sessions),
+    activeProjectId: sessions[0]?.projectId,
     activeSessionId: sessions[0]?.id,
     diagnostics: {
       platform: 'darwin', arch: 'arm64', nodeVersion: '22.x', electronVersion: '35.x',
@@ -27,8 +31,17 @@ export function createBrowserPreviewApi(): AgentLabApi {
   })
   return {
     load: async () => snapshot(),
-    createSession: async (config) => {
-      const session: LabSession = { id: crypto.randomUUID(), title: '新实验', createdAt: Date.now(), updatedAt: Date.now(), status: 'idle', config: { ...createDefaultConfig('/Users/you/Projects/example-app'), ...config }, messages: [] }
+    listProjects: async () => structuredClone(projects),
+    createProject: async (rootPath) => {
+      const existing = projects.find((project) => project.rootPath === rootPath)
+      if (existing) return structuredClone(existing)
+      const project: Project = { id: crypto.randomUUID(), name: rootPath.split('/').filter(Boolean).pop() || rootPath, rootPath, createdAt: Date.now(), updatedAt: Date.now() }
+      projects = [project, ...projects]
+      return structuredClone(project)
+    },
+    createSession: async (config, projectId) => {
+      const project = projects.find((item) => item.id === projectId) ?? projects[0]
+      const session: LabSession = { id: crypto.randomUUID(), projectId: project.id, title: '新实验', createdAt: Date.now(), updatedAt: Date.now(), status: 'idle', config: { ...createDefaultConfig(project.rootPath), ...config, cwd: project.rootPath }, messages: [] }
       sessions = [session, ...sessions]
       return structuredClone(session)
     },

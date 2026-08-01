@@ -50,4 +50,23 @@ describe('SessionStore', () => {
     assert.equal(restored.listEvents(session.id)[0].turnId, turnId)
     assert.equal(restored.get(session.id).status, 'idle')
   })
+
+  it('migrates sessions into shared projects by workspace path', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'agentlab-project-test-'))
+    temporaryDirectories.push(directory)
+    const store = new SessionStore(directory, '/workspace')
+    await store.load()
+    const first = await store.create({ cwd: '/workspace/repository-a' })
+    const second = await store.create({ cwd: '/workspace/repository-a' })
+    const third = await store.create({ cwd: '/workspace/repository-b' })
+
+    assert.equal(first.projectId, second.projectId)
+    assert.notEqual(first.projectId, third.projectId)
+    assert.equal(store.listProjects().length, 2)
+
+    const restored = new SessionStore(directory, '/fallback')
+    const snapshot = await restored.load()
+    assert.equal(snapshot.projects.length, 2)
+    assert.equal(snapshot.sessions.find((session) => session.id === first.id)?.projectId, second.projectId)
+  })
 })
